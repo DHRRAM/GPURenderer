@@ -1,0 +1,46 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "E:/Dhruv/UofU/UofU_Assignments/CS_6610/GPURenderer/out/build/x64-debug/_deps/freeglut-subbuild/CMakeFiles/freeglut-populate"
+		},
+		{
+			"file" : "E:/Dhruv/UofU/UofU_Assignments/CS_6610/GPURenderer/out/build/x64-debug/_deps/freeglut-subbuild/CMakeFiles/freeglut-populate.rule"
+		},
+		{
+			"file" : "E:/Dhruv/UofU/UofU_Assignments/CS_6610/GPURenderer/out/build/x64-debug/_deps/freeglut-subbuild/CMakeFiles/freeglut-populate-complete.rule"
+		},
+		{
+			"file" : "E:/Dhruv/UofU/UofU_Assignments/CS_6610/GPURenderer/out/build/x64-debug/_deps/freeglut-subbuild/freeglut-populate-prefix/src/freeglut-populate-stamp/freeglut-populate-build.rule"
+		},
+		{
+			"file" : "E:/Dhruv/UofU/UofU_Assignments/CS_6610/GPURenderer/out/build/x64-debug/_deps/freeglut-subbuild/freeglut-populate-prefix/src/freeglut-populate-stamp/freeglut-populate-configure.rule"
+		},
+		{
+			"file" : "E:/Dhruv/UofU/UofU_Assignments/CS_6610/GPURenderer/out/build/x64-debug/_deps/freeglut-subbuild/freeglut-populate-prefix/src/freeglut-populate-stamp/freeglut-populate-download.rule"
+		},
+		{
+			"file" : "E:/Dhruv/UofU/UofU_Assignments/CS_6610/GPURenderer/out/build/x64-debug/_deps/freeglut-subbuild/freeglut-populate-prefix/src/freeglut-populate-stamp/freeglut-populate-install.rule"
+		},
+		{
+			"file" : "E:/Dhruv/UofU/UofU_Assignments/CS_6610/GPURenderer/out/build/x64-debug/_deps/freeglut-subbuild/freeglut-populate-prefix/src/freeglut-populate-stamp/freeglut-populate-mkdir.rule"
+		},
+		{
+			"file" : "E:/Dhruv/UofU/UofU_Assignments/CS_6610/GPURenderer/out/build/x64-debug/_deps/freeglut-subbuild/freeglut-populate-prefix/src/freeglut-populate-stamp/freeglut-populate-patch.rule"
+		},
+		{
+			"file" : "E:/Dhruv/UofU/UofU_Assignments/CS_6610/GPURenderer/out/build/x64-debug/_deps/freeglut-subbuild/freeglut-populate-prefix/src/freeglut-populate-stamp/freeglut-populate-test.rule"
+		},
+		{
+			"file" : "E:/Dhruv/UofU/UofU_Assignments/CS_6610/GPURenderer/out/build/x64-debug/_deps/freeglut-subbuild/freeglut-populate-prefix/src/freeglut-populate-stamp/freeglut-populate-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"freeglut-populate"
+		],
+		"name" : "freeglut-populate"
+	}
+}

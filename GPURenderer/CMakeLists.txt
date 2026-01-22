@@ -3,7 +3,7 @@
 #
 
 # Add source to this project's executable.
-add_executable (GPURenderer "GPURenderer.cpp")
+add_executable (GPURenderer "GPURenderer.cpp" "shader.vert" "shader.frag")
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET GPURenderer PROPERTY CXX_STANDARD 20)
@@ -11,6 +11,8 @@ endif()
 
 find_package(OpenGL REQUIRED)
 find_package(GLUT QUIET)
+
+target_compile_definitions(GPURenderer PRIVATE GPURENDERER_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 target_include_directories(GPURenderer PRIVATE ${OPENGL_INCLUDE_DIR})
 if (TARGET OpenGL::GL)
