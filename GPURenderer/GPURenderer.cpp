@@ -1,9 +1,16 @@
-#include <GL/freeglut.h>
+#include <GLFW/glfw3.h>
+
+#include <assimp/Importer.hpp>
+#include <assimp/postprocess.h>
+#include <assimp/scene.h>
+
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
 
 #include <algorithm>
-#include <cctype>
-#include <cstddef>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -18,6 +25,9 @@
 
 #ifndef GL_ARRAY_BUFFER
 #define GL_ARRAY_BUFFER 0x8892
+#endif
+#ifndef GL_ELEMENT_ARRAY_BUFFER
+#define GL_ELEMENT_ARRAY_BUFFER 0x8893
 #endif
 #ifndef GL_STATIC_DRAW
 #define GL_STATIC_DRAW 0x88E4
@@ -42,24 +52,20 @@ namespace {
 	constexpr int kDefaultWindowWidth = 800;
 	constexpr int kDefaultWindowHeight = 600;
 	constexpr float kRotationSpeedDegPerPixel = 0.5f;
+	constexpr float kLightRotationSpeedDegPerPixel = 0.6f;
 	constexpr float kZoomSpeed = 1.0f;
 	constexpr float kMinCameraDistance = 0.1f;
 	constexpr float kDefaultFovDeg = 45.0f;
 	constexpr float kNearPlane = 0.1f;
 	constexpr float kFarPlane = 500.0f;
-
-	struct Vec3 {
-		float x = 0.0f;
-		float y = 0.0f;
-		float z = 0.0f;
-	};
+	constexpr float kLightMarkerPointSize = 8.0f;
 
 	struct Bounds {
-		Vec3 min;
-		Vec3 max;
+		glm::vec3 min{0.0f};
+		glm::vec3 max{0.0f};
 		bool valid = false;
 
-		void Expand(const Vec3& v) {
+		void Expand(const glm::vec3& v) {
 			if (!valid) {
 				min = v;
 				max = v;
@@ -74,125 +80,83 @@ namespace {
 			max.z = std::max(max.z, v.z);
 		}
 
-		Vec3 Center() const {
-			return Vec3{
+		glm::vec3 Center() const {
+			return glm::vec3(
 				0.5f * (min.x + max.x),
 				0.5f * (min.y + max.y),
-				0.5f * (min.z + max.z)
-			};
+				0.5f * (min.z + max.z));
 		}
 
 		float MaxExtent() const {
-			const float dx = max.x - min.x;
-			const float dy = max.y - min.y;
-			const float dz = max.z - min.z;
-			return std::max(dx, std::max(dy, dz));
+			const glm::vec3 size = max - min;
+			return std::max(size.x, std::max(size.y, size.z));
 		}
 	};
 
-	struct Mat4 {
-		float m[16]{};
-
-		static Mat4 Identity() {
-			Mat4 out;
-			out.m[0] = 1.0f;
-			out.m[5] = 1.0f;
-			out.m[10] = 1.0f;
-			out.m[15] = 1.0f;
-			return out;
-		}
-
-		static Mat4 Translation(float x, float y, float z) {
-			Mat4 out = Identity();
-			out.m[12] = x;
-			out.m[13] = y;
-			out.m[14] = z;
-			return out;
-		}
-
-		static Mat4 Scale(float x, float y, float z) {
-			Mat4 out{};
-			out.m[0] = x;
-			out.m[5] = y;
-			out.m[10] = z;
-			out.m[15] = 1.0f;
-			return out;
-		}
-
-		static Mat4 RotationX(float radians) {
-			Mat4 out = Identity();
-			const float c = std::cos(radians);
-			const float s = std::sin(radians);
-			out.m[5] = c;
-			out.m[6] = s;
-			out.m[9] = -s;
-			out.m[10] = c;
-			return out;
-		}
-
-		static Mat4 RotationY(float radians) {
-			Mat4 out = Identity();
-			const float c = std::cos(radians);
-			const float s = std::sin(radians);
-			out.m[0] = c;
-			out.m[2] = -s;
-			out.m[8] = s;
-			out.m[10] = c;
-			return out;
-		}
-
-		static Mat4 Perspective(float fovYRadians, float aspect, float zNear, float zFar) {
-			Mat4 out{};
-			const float f = 1.0f / std::tan(0.5f * fovYRadians);
-			out.m[0] = f / aspect;
-			out.m[5] = f;
-			out.m[10] = (zFar + zNear) / (zNear - zFar);
-			out.m[11] = -1.0f;
-			out.m[14] = (2.0f * zFar * zNear) / (zNear - zFar);
-			return out;
-		}
-
-		static Mat4 Ortho(float left, float right, float bottom, float top, float zNear, float zFar) {
-			Mat4 out{};
-			out.m[0] = 2.0f / (right - left);
-			out.m[5] = 2.0f / (top - bottom);
-			out.m[10] = -2.0f / (zFar - zNear);
-			out.m[12] = -(right + left) / (right - left);
-			out.m[13] = -(top + bottom) / (top - bottom);
-			out.m[14] = -(zFar + zNear) / (zFar - zNear);
-			out.m[15] = 1.0f;
-			return out;
-		}
-
-		Mat4 operator*(const Mat4& rhs) const {
-			Mat4 out{};
-			for (int col = 0; col < 4; ++col) {
-				for (int row = 0; row < 4; ++row) {
-					float sum = 0.0f;
-					for (int k = 0; k < 4; ++k) {
-						sum += m[k * 4 + row] * rhs.m[col * 4 + k];
-					}
-					out.m[col * 4 + row] = sum;
-				}
-			}
-			return out;
-		}
+	struct Vertex {
+		glm::vec3 position;
+		glm::vec3 normal;
 	};
 
 	const char* kFallbackVertexShader = R"(#version 120
 
 attribute vec3 aPosition;
+attribute vec3 aNormal;
+
 uniform mat4 uMvp;
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat3 uNormalMatrix;
+
+varying vec3 vNormal;
+varying vec3 vPositionView;
 
 void main() {
+	vec4 worldPos = uModel * vec4(aPosition, 1.0);
+	vec4 viewPos = uView * worldPos;
+	vPositionView = viewPos.xyz;
+	vNormal = normalize(uNormalMatrix * aNormal);
 	gl_Position = uMvp * vec4(aPosition, 1.0);
 }
 )";
 
-const char* kFallbackFragmentShader = R"(#version 120
+	const char* kFallbackFragmentShader = R"(#version 120
+
+varying vec3 vNormal;
+varying vec3 vPositionView;
+
+uniform vec3 uLightPosView;
+uniform vec3 uLightColor;
+uniform vec3 uAmbientColor;
+uniform vec3 uDiffuseColor;
+uniform vec3 uSpecularColor;
+uniform vec3 uMarkerColor;
+uniform float uShininess;
+uniform int uShadeMode;
 
 void main() {
-	gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+	if (uShadeMode == 1) {
+		gl_FragColor = vec4(clamp(vNormal, 0.0, 1.0), 1.0);
+		return;
+	}
+	if (uShadeMode == 2) {
+		gl_FragColor = vec4(uMarkerColor, 1.0);
+		return;
+	}
+
+	vec3 n = normalize(vNormal);
+	vec3 lightDir = normalize(uLightPosView - vPositionView);
+	float diff = max(dot(n, lightDir), 0.0);
+
+	vec3 viewDir = normalize(-vPositionView);
+	vec3 halfDir = normalize(lightDir + viewDir);
+	float spec = pow(max(dot(n, halfDir), 0.0), uShininess);
+
+	vec3 ambient = uAmbientColor * uLightColor;
+	vec3 diffuse = uDiffuseColor * diff * uLightColor;
+	vec3 specular = uSpecularColor * spec * uLightColor;
+
+	gl_FragColor = vec4(ambient + diffuse + specular, 1.0);
 }
 )";
 
@@ -202,27 +166,48 @@ void main() {
 	bool gLeftDown = false;
 	bool gRightDown = false;
 	bool gMiddleDown = false;
-	int gLastMouseX = 0;
-	int gLastMouseY = 0;
+	double gLastMouseX = 0.0;
+	double gLastMouseY = 0.0;
 	float gYawDeg = 0.0f;
 	float gPitchDeg = 0.0f;
 	float gCameraDistance = 4.0f;
 	float gPanX = 0.0f;
 	float gPanY = 0.0f;
+	float gLightYawDeg = 45.0f;
+	float gLightPitchDeg = 20.0f;
+	float gLightDistance = 6.0f;
+	bool gShowNormals = false;
 
 	std::string gObjPath;
 	std::string gVertexShaderPath;
 	std::string gFragmentShaderPath;
 
-	std::vector<float> gVertexData;
-	int gVertexCount = 0;
+	std::vector<Vertex> gVertices;
+	std::vector<unsigned int> gIndices;
+	int gIndexCount = 0;
 	Bounds gBounds;
-	Vec3 gCenter;
+	glm::vec3 gCenter(0.0f);
 
+	GLFWwindow* gWindow = nullptr;
 	GLuint gVao = 0;
 	GLuint gVbo = 0;
+	GLuint gEbo = 0;
+	GLuint gLightVao = 0;
+	GLuint gLightVbo = 0;
 	GLuint gProgram = 0;
 	GLint gMvpLocation = -1;
+	GLint gModelLocation = -1;
+	GLint gViewLocation = -1;
+	GLint gNormalMatrixLocation = -1;
+	GLint gLightPosLocation = -1;
+	GLint gLightColorLocation = -1;
+	GLint gAmbientLocation = -1;
+	GLint gDiffuseLocation = -1;
+	GLint gSpecularLocation = -1;
+	GLint gMarkerColorLocation = -1;
+	GLint gShininessLocation = -1;
+	GLint gShadeModeLocation = -1;
+	bool gUseVao = false;
 
 	using GlGenVertexArraysProc = void (APIENTRYP)(GLsizei, GLuint*);
 	using GlBindVertexArrayProc = void (APIENTRYP)(GLuint);
@@ -247,6 +232,13 @@ void main() {
 	using GlUseProgramProc = void (APIENTRYP)(GLuint);
 	using GlGetUniformLocationProc = GLint (APIENTRYP)(GLuint, const char*);
 	using GlUniformMatrix4fvProc = void (APIENTRYP)(GLint, GLsizei, GLboolean, const GLfloat*);
+	using GlUniformMatrix3fvProc = void (APIENTRYP)(GLint, GLsizei, GLboolean, const GLfloat*);
+	using GlUniform3fvProc = void (APIENTRYP)(GLint, GLsizei, const GLfloat*);
+	using GlUniform1fProc = void (APIENTRYP)(GLint, GLfloat);
+	using GlUniform1iProc = void (APIENTRYP)(GLint, GLint);
+	using GlDeleteBuffersProc = void (APIENTRYP)(GLsizei, const GLuint*);
+	using GlDeleteVertexArraysProc = void (APIENTRYP)(GLsizei, const GLuint*);
+
 	GlGenVertexArraysProc pglGenVertexArrays = nullptr;
 	GlBindVertexArrayProc pglBindVertexArray = nullptr;
 	GlGenBuffersProc pglGenBuffers = nullptr;
@@ -270,11 +262,12 @@ void main() {
 	GlUseProgramProc pglUseProgram = nullptr;
 	GlGetUniformLocationProc pglGetUniformLocation = nullptr;
 	GlUniformMatrix4fvProc pglUniformMatrix4fv = nullptr;
-
-	template <typename T>
-	T Clamp(T value, T minValue, T maxValue) {
-		return std::max(minValue, std::min(value, maxValue));
-	}
+	GlUniformMatrix3fvProc pglUniformMatrix3fv = nullptr;
+	GlUniform3fvProc pglUniform3fv = nullptr;
+	GlUniform1fProc pglUniform1f = nullptr;
+	GlUniform1iProc pglUniform1i = nullptr;
+	GlDeleteBuffersProc pglDeleteBuffers = nullptr;
+	GlDeleteVertexArraysProc pglDeleteVertexArrays = nullptr;
 
 	float DegreesToRadians(float degrees) {
 		return degrees * 3.14159265358979323846f / 180.0f;
@@ -303,9 +296,9 @@ void main() {
 
 	template <typename T>
 	bool LoadGlFunction(T& func, const char* name, const char* fallback = nullptr) {
-		func = reinterpret_cast<T>(glutGetProcAddress(name));
+		func = reinterpret_cast<T>(glfwGetProcAddress(name));
 		if (!func && fallback) {
-			func = reinterpret_cast<T>(glutGetProcAddress(fallback));
+			func = reinterpret_cast<T>(glfwGetProcAddress(fallback));
 		}
 		if (!func) {
 			std::fprintf(stderr, "Missing OpenGL function: %s\n", name);
@@ -314,10 +307,20 @@ void main() {
 		return true;
 	}
 
+	template <typename T>
+	bool LoadOptionalGlFunction(T& func, const char* name, const char* fallback = nullptr) {
+		func = reinterpret_cast<T>(glfwGetProcAddress(name));
+		if (!func && fallback) {
+			func = reinterpret_cast<T>(glfwGetProcAddress(fallback));
+		}
+		return func != nullptr;
+	}
+
 	bool LoadGlFunctions() {
+		gUseVao = LoadOptionalGlFunction(pglGenVertexArrays, "glGenVertexArrays", "glGenVertexArraysARB") &&
+			LoadOptionalGlFunction(pglBindVertexArray, "glBindVertexArray", "glBindVertexArrayARB");
+
 		bool ok = true;
-		ok &= LoadGlFunction(pglGenVertexArrays, "glGenVertexArrays", "glGenVertexArraysARB");
-		ok &= LoadGlFunction(pglBindVertexArray, "glBindVertexArray", "glBindVertexArrayARB");
 		ok &= LoadGlFunction(pglGenBuffers, "glGenBuffers", "glGenBuffersARB");
 		ok &= LoadGlFunction(pglBindBuffer, "glBindBuffer", "glBindBufferARB");
 		ok &= LoadGlFunction(pglBufferData, "glBufferData", "glBufferDataARB");
@@ -339,44 +342,72 @@ void main() {
 		ok &= LoadGlFunction(pglUseProgram, "glUseProgram");
 		ok &= LoadGlFunction(pglGetUniformLocation, "glGetUniformLocation");
 		ok &= LoadGlFunction(pglUniformMatrix4fv, "glUniformMatrix4fv");
+		ok &= LoadGlFunction(pglUniformMatrix3fv, "glUniformMatrix3fv");
+		ok &= LoadGlFunction(pglUniform3fv, "glUniform3fv");
+		ok &= LoadGlFunction(pglUniform1f, "glUniform1f");
+		ok &= LoadGlFunction(pglUniform1i, "glUniform1i");
+		LoadOptionalGlFunction(pglDeleteBuffers, "glDeleteBuffers");
+		LoadOptionalGlFunction(pglDeleteVertexArrays, "glDeleteVertexArrays", "glDeleteVertexArraysARB");
 		return ok;
 	}
 
-	bool LoadObjVertices(const std::string& path, std::vector<float>& vertices, Bounds& bounds) {
-		std::ifstream file(path);
-		if (!file) {
-			std::fprintf(stderr, "Failed to open OBJ file: %s\n", path.c_str());
+	bool LoadMesh(const std::string& path, std::vector<Vertex>& vertices, std::vector<unsigned int>& indices, Bounds& bounds) {
+		Assimp::Importer importer;
+		const aiScene* scene = importer.ReadFile(
+			path,
+			aiProcess_Triangulate |
+			aiProcess_GenSmoothNormals |
+			aiProcess_JoinIdenticalVertices |
+			aiProcess_ImproveCacheLocality |
+			aiProcess_PreTransformVertices);
+
+		if (!scene || !scene->HasMeshes()) {
+			std::fprintf(stderr, "Assimp failed to load mesh: %s\n", importer.GetErrorString());
 			return false;
 		}
 
-		std::string line;
-		while (std::getline(file, line)) {
-			if (line.empty()) {
+		vertices.clear();
+		indices.clear();
+		bounds = Bounds{};
+
+		for (unsigned int meshIndex = 0; meshIndex < scene->mNumMeshes; ++meshIndex) {
+			const aiMesh* mesh = scene->mMeshes[meshIndex];
+			if (!mesh || mesh->mNumVertices == 0) {
 				continue;
 			}
-			if (line[0] != 'v' || (line.size() > 1 && !std::isspace(static_cast<unsigned char>(line[1])))) {
-				continue;
+
+			const unsigned int baseIndex = static_cast<unsigned int>(vertices.size());
+			vertices.reserve(vertices.size() + mesh->mNumVertices);
+
+			for (unsigned int i = 0; i < mesh->mNumVertices; ++i) {
+				const aiVector3D pos = mesh->mVertices[i];
+				aiVector3D normal(0.0f, 1.0f, 0.0f);
+				if (mesh->HasNormals()) {
+					normal = mesh->mNormals[i];
+				}
+				Vertex vertex;
+				vertex.position = glm::vec3(pos.x, pos.y, pos.z);
+				vertex.normal = glm::vec3(normal.x, normal.y, normal.z);
+				vertices.push_back(vertex);
+				bounds.Expand(vertex.position);
 			}
-			std::istringstream stream(line);
-			char prefix = 0;
-			stream >> prefix;
-			if (prefix != 'v') {
-				continue;
+
+			for (unsigned int i = 0; i < mesh->mNumFaces; ++i) {
+				const aiFace& face = mesh->mFaces[i];
+				if (face.mNumIndices != 3) {
+					continue;
+				}
+				indices.push_back(baseIndex + face.mIndices[0]);
+				indices.push_back(baseIndex + face.mIndices[1]);
+				indices.push_back(baseIndex + face.mIndices[2]);
 			}
-			Vec3 v;
-			if (!(stream >> v.x >> v.y >> v.z)) {
-				continue;
-			}
-			vertices.push_back(v.x);
-			vertices.push_back(v.y);
-			vertices.push_back(v.z);
-			bounds.Expand(v);
 		}
 
-		if (!bounds.valid || vertices.empty()) {
-			std::fprintf(stderr, "OBJ file has no vertex positions: %s\n", path.c_str());
+		if (!bounds.valid || vertices.empty() || indices.empty()) {
+			std::fprintf(stderr, "Mesh contained no valid triangles: %s\n", path.c_str());
 			return false;
 		}
+
 		return true;
 	}
 
@@ -408,6 +439,7 @@ void main() {
 		pglAttachShader(program, vertexShader);
 		pglAttachShader(program, fragmentShader);
 		pglBindAttribLocation(program, 0, "aPosition");
+		pglBindAttribLocation(program, 1, "aNormal");
 		pglLinkProgram(program);
 
 		GLint status = 0;
@@ -462,167 +494,343 @@ void main() {
 		}
 		gProgram = newProgram;
 		gMvpLocation = pglGetUniformLocation(gProgram, "uMvp");
+		gModelLocation = pglGetUniformLocation(gProgram, "uModel");
+		gViewLocation = pglGetUniformLocation(gProgram, "uView");
+		gNormalMatrixLocation = pglGetUniformLocation(gProgram, "uNormalMatrix");
+		gLightPosLocation = pglGetUniformLocation(gProgram, "uLightPosView");
+		gLightColorLocation = pglGetUniformLocation(gProgram, "uLightColor");
+		gAmbientLocation = pglGetUniformLocation(gProgram, "uAmbientColor");
+		gDiffuseLocation = pglGetUniformLocation(gProgram, "uDiffuseColor");
+		gSpecularLocation = pglGetUniformLocation(gProgram, "uSpecularColor");
+		gMarkerColorLocation = pglGetUniformLocation(gProgram, "uMarkerColor");
+		gShininessLocation = pglGetUniformLocation(gProgram, "uShininess");
+		gShadeModeLocation = pglGetUniformLocation(gProgram, "uShadeMode");
 		return true;
 	}
 
 	void CreateBuffers() {
-		pglGenVertexArrays(1, &gVao);
-		pglBindVertexArray(gVao);
+		if (gUseVao) {
+			pglGenVertexArrays(1, &gVao);
+			pglBindVertexArray(gVao);
+		}
 
 		pglGenBuffers(1, &gVbo);
 		pglBindBuffer(GL_ARRAY_BUFFER, gVbo);
-		pglBufferData(GL_ARRAY_BUFFER,
-			static_cast<std::ptrdiff_t>(gVertexData.size() * sizeof(float)),
-			gVertexData.data(),
+		pglBufferData(
+			GL_ARRAY_BUFFER,
+			static_cast<std::ptrdiff_t>(gVertices.size() * sizeof(Vertex)),
+			gVertices.data(),
+			GL_STATIC_DRAW);
+
+		pglGenBuffers(1, &gEbo);
+		pglBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gEbo);
+		pglBufferData(
+			GL_ELEMENT_ARRAY_BUFFER,
+			static_cast<std::ptrdiff_t>(gIndices.size() * sizeof(unsigned int)),
+			gIndices.data(),
 			GL_STATIC_DRAW);
 
 		pglEnableVertexAttribArray(0);
-		pglVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+		pglVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
+		pglEnableVertexAttribArray(1);
+		pglVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
 
-		pglBindVertexArray(0);
+		if (gUseVao) {
+			pglBindVertexArray(0);
+		}
 	}
 
-	Mat4 BuildMvp() {
-		const float aspect = (gWindowHeight > 0) ? static_cast<float>(gWindowWidth) /
-			static_cast<float>(gWindowHeight) : 1.0f;
+	void CreateLightBuffers() {
+		const Vertex lightVertex{
+			glm::vec3(0.0f, 0.0f, 0.0f),
+			glm::vec3(0.0f, 1.0f, 0.0f)
+		};
 
-		Mat4 model = Mat4::Translation(-gCenter.x, -gCenter.y, -gCenter.z);
+		if (gUseVao) {
+			pglGenVertexArrays(1, &gLightVao);
+			pglBindVertexArray(gLightVao);
+		}
 
+		pglGenBuffers(1, &gLightVbo);
+		pglBindBuffer(GL_ARRAY_BUFFER, gLightVbo);
+		pglBufferData(GL_ARRAY_BUFFER, static_cast<std::ptrdiff_t>(sizeof(Vertex)), &lightVertex, GL_STATIC_DRAW);
+
+		pglEnableVertexAttribArray(0);
+		pglVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
+		pglEnableVertexAttribArray(1);
+		pglVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
+
+		if (gUseVao) {
+			pglBindVertexArray(0);
+		}
+	}
+
+	glm::mat4 BuildModelMatrix() {
+		glm::mat4 model(1.0f);
+		model = glm::translate(model, -gCenter);
 		if (!gUsePerspective) {
 			const float scale = 1.0f / gCameraDistance;
-			model = Mat4::Scale(scale, scale, scale) * model;
+			model = glm::scale(glm::mat4(1.0f), glm::vec3(scale)) * model;
 		}
+		return model;
+	}
 
-		const float yaw = DegreesToRadians(gYawDeg);
-		const float pitch = DegreesToRadians(gPitchDeg);
-		Mat4 view = Mat4::Translation(gPanX, gPanY, 0.0f) *
-			Mat4::Translation(0.0f, 0.0f, -gCameraDistance) *
-			Mat4::RotationX(pitch) * Mat4::RotationY(yaw);
+	glm::mat4 BuildViewMatrix() {
+		glm::mat4 view(1.0f);
+		view = glm::translate(view, glm::vec3(gPanX, gPanY, 0.0f));
+		view = glm::translate(view, glm::vec3(0.0f, 0.0f, -gCameraDistance));
+		view = glm::rotate(view, glm::radians(gPitchDeg), glm::vec3(1.0f, 0.0f, 0.0f));
+		view = glm::rotate(view, glm::radians(gYawDeg), glm::vec3(0.0f, 1.0f, 0.0f));
+		return view;
+	}
 
-		Mat4 projection;
+	glm::mat4 BuildProjectionMatrix() {
+		const float aspect = (gWindowHeight > 0)
+			? static_cast<float>(gWindowWidth) / static_cast<float>(gWindowHeight)
+			: 1.0f;
 		if (gUsePerspective) {
-			projection = Mat4::Perspective(DegreesToRadians(kDefaultFovDeg), aspect, kNearPlane, kFarPlane);
-		} else {
-			const float size = 1.0f;
-			projection = Mat4::Ortho(-size * aspect, size * aspect, -size, size, -kFarPlane, kFarPlane);
+			return glm::perspective(glm::radians(kDefaultFovDeg), aspect, kNearPlane, kFarPlane);
 		}
 
-		return projection * view * model;
+		const float size = 1.0f;
+		return glm::ortho(-size * aspect, size * aspect, -size, size, -kFarPlane, kFarPlane);
+	}
+
+	glm::vec3 ComputeLightPosition(const glm::mat4& model) {
+		const float yaw = glm::radians(gLightYawDeg);
+		const float pitch = glm::radians(gLightPitchDeg);
+		glm::vec3 direction(
+			std::sin(yaw) * std::cos(pitch),
+			std::sin(pitch),
+			std::cos(yaw) * std::cos(pitch));
+		const glm::vec3 lightModel = gCenter + direction * gLightDistance;
+		return glm::vec3(model * glm::vec4(lightModel, 1.0f));
 	}
 
 	void UpdateWindowTitle() {
-		const char* mode = gUsePerspective ? "Perspective" : "Orthogonal";
-		char title[128];
-		std::snprintf(title, sizeof(title), "GPURenderer - Project 2 | %s", mode);
-		glutSetWindowTitle(title);
+		if (!gWindow) {
+			return;
+		}
+		const char* mode = gUsePerspective ? "Perspective" : "Orthographic";
+		const char* shade = gShowNormals ? "Normals" : "Blinn";
+		char title[160];
+		std::snprintf(title, sizeof(title), "GPURenderer - Project 3 | %s | %s", mode, shade);
+		glfwSetWindowTitle(gWindow, title);
 	}
 
 	void Display() {
 		glClearColor(0.05f, 0.05f, 0.08f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-		if (gProgram == 0 || gVao == 0) {
-			glutSwapBuffers();
+		if (gProgram == 0 || gVbo == 0 || gEbo == 0) {
 			return;
 		}
 
-		UpdateWindowTitle();
-
 		pglUseProgram(gProgram);
+
+		const glm::mat4 model = BuildModelMatrix();
+		const glm::mat4 view = BuildViewMatrix();
+		const glm::mat4 projection = BuildProjectionMatrix();
+		const glm::mat4 mvp = projection * view * model;
+		const glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(view * model)));
+
 		if (gMvpLocation >= 0) {
-			const Mat4 mvp = BuildMvp();
-			pglUniformMatrix4fv(gMvpLocation, 1, GL_FALSE, mvp.m);
+			pglUniformMatrix4fv(gMvpLocation, 1, GL_FALSE, glm::value_ptr(mvp));
+		}
+		if (gModelLocation >= 0) {
+			pglUniformMatrix4fv(gModelLocation, 1, GL_FALSE, glm::value_ptr(model));
+		}
+		if (gViewLocation >= 0) {
+			pglUniformMatrix4fv(gViewLocation, 1, GL_FALSE, glm::value_ptr(view));
+		}
+		if (gNormalMatrixLocation >= 0) {
+			pglUniformMatrix3fv(gNormalMatrixLocation, 1, GL_FALSE, glm::value_ptr(normalMatrix));
 		}
 
-		pglBindVertexArray(gVao);
-		glDrawArrays(GL_POINTS, 0, gVertexCount);
-		pglBindVertexArray(0);
-		pglUseProgram(0);
+		const glm::vec3 lightPosWorld = ComputeLightPosition(model);
+		const glm::vec3 lightPosView = glm::vec3(view * glm::vec4(lightPosWorld, 1.0f));
+		const glm::vec3 lightColor(1.0f, 1.0f, 1.0f);
+		const glm::vec3 ambient(0.15f, 0.15f, 0.18f);
+		const glm::vec3 diffuse(0.8f, 0.7f, 0.65f);
+		const glm::vec3 specular(0.9f, 0.9f, 0.9f);
+		const float shininess = 64.0f;
 
-		glutSwapBuffers();
+		if (gLightPosLocation >= 0) {
+			pglUniform3fv(gLightPosLocation, 1, glm::value_ptr(lightPosView));
+		}
+		if (gLightColorLocation >= 0) {
+			pglUniform3fv(gLightColorLocation, 1, glm::value_ptr(lightColor));
+		}
+		if (gAmbientLocation >= 0) {
+			pglUniform3fv(gAmbientLocation, 1, glm::value_ptr(ambient));
+		}
+		if (gDiffuseLocation >= 0) {
+			pglUniform3fv(gDiffuseLocation, 1, glm::value_ptr(diffuse));
+		}
+		if (gSpecularLocation >= 0) {
+			pglUniform3fv(gSpecularLocation, 1, glm::value_ptr(specular));
+		}
+		if (gShininessLocation >= 0) {
+			pglUniform1f(gShininessLocation, shininess);
+		}
+		if (gShadeModeLocation >= 0) {
+			pglUniform1i(gShadeModeLocation, gShowNormals ? 1 : 0);
+		}
+
+		if (gUseVao && gVao != 0) {
+			pglBindVertexArray(gVao);
+		} else {
+			pglBindBuffer(GL_ARRAY_BUFFER, gVbo);
+			pglBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gEbo);
+			pglEnableVertexAttribArray(0);
+			pglVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
+			pglEnableVertexAttribArray(1);
+			pglVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
+		}
+
+		glDrawElements(GL_TRIANGLES, gIndexCount, GL_UNSIGNED_INT, nullptr);
+
+		if (gUseVao && gVao != 0) {
+			pglBindVertexArray(0);
+		}
+
+		if (gLightVbo != 0) {
+			const glm::mat4 modelLight = glm::translate(glm::mat4(1.0f), lightPosWorld);
+			const glm::mat4 mvpLight = projection * view * modelLight;
+			const glm::mat3 normalMatrixLight = glm::transpose(glm::inverse(glm::mat3(view * modelLight)));
+
+			if (gMvpLocation >= 0) {
+				pglUniformMatrix4fv(gMvpLocation, 1, GL_FALSE, glm::value_ptr(mvpLight));
+			}
+			if (gModelLocation >= 0) {
+				pglUniformMatrix4fv(gModelLocation, 1, GL_FALSE, glm::value_ptr(modelLight));
+			}
+			if (gNormalMatrixLocation >= 0) {
+				pglUniformMatrix3fv(gNormalMatrixLocation, 1, GL_FALSE, glm::value_ptr(normalMatrixLight));
+			}
+			if (gShadeModeLocation >= 0) {
+				pglUniform1i(gShadeModeLocation, 2);
+			}
+			if (gMarkerColorLocation >= 0) {
+				const glm::vec3 markerColor(1.0f, 0.9f, 0.1f);
+				pglUniform3fv(gMarkerColorLocation, 1, glm::value_ptr(markerColor));
+			}
+
+			glPointSize(kLightMarkerPointSize);
+			if (gUseVao && gLightVao != 0) {
+				pglBindVertexArray(gLightVao);
+			} else {
+				pglBindBuffer(GL_ARRAY_BUFFER, gLightVbo);
+				pglEnableVertexAttribArray(0);
+				pglVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
+				pglEnableVertexAttribArray(1);
+				pglVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
+			}
+
+			glDrawArrays(GL_POINTS, 0, 1);
+
+			if (gUseVao && gLightVao != 0) {
+				pglBindVertexArray(0);
+			}
+			glPointSize(1.0f);
+		}
+
+		pglUseProgram(0);
 	}
 
-	void Reshape(int width, int height) {
+	void Reshape(GLFWwindow*, int width, int height) {
 		gWindowWidth = width > 0 ? width : 1;
 		gWindowHeight = height > 0 ? height : 1;
 		glViewport(0, 0, gWindowWidth, gWindowHeight);
 	}
 
-	void MouseButton(int button, int state, int x, int y) {
-		if (button == GLUT_LEFT_BUTTON) {
-			gLeftDown = (state == GLUT_DOWN);
-		} else if (button == GLUT_RIGHT_BUTTON) {
-			gRightDown = (state == GLUT_DOWN);
-		} else if (button == GLUT_MIDDLE_BUTTON) {
-			gMiddleDown = (state == GLUT_DOWN);
-		}
-		gLastMouseX = x;
-		gLastMouseY = y;
+	bool IsCtrlDown(GLFWwindow* window) {
+		return glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+			glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
 	}
 
-	void MouseMotion(int x, int y) {
-		const int dx = x - gLastMouseX;
-		const int dy = y - gLastMouseY;
+	void MouseButton(GLFWwindow* window, int button, int action, int) {
+		if (button == GLFW_MOUSE_BUTTON_LEFT) {
+			gLeftDown = (action == GLFW_PRESS);
+		} else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+			gRightDown = (action == GLFW_PRESS);
+		} else if (button == GLFW_MOUSE_BUTTON_MIDDLE) {
+			gMiddleDown = (action == GLFW_PRESS);
+		}
+		glfwGetCursorPos(window, &gLastMouseX, &gLastMouseY);
+	}
+
+	void MouseMotion(GLFWwindow* window, double x, double y) {
+		const float dx = static_cast<float>(x - gLastMouseX);
+		const float dy = static_cast<float>(y - gLastMouseY);
 		const float viewHeight = gUsePerspective
 			? (2.0f * gCameraDistance * std::tan(0.5f * DegreesToRadians(kDefaultFovDeg)))
 			: 2.0f;
 		const float panScale = (gWindowHeight > 0) ? (viewHeight / static_cast<float>(gWindowHeight)) : 0.0f;
 
 		if (gLeftDown) {
-			gYawDeg += static_cast<float>(dx) * kRotationSpeedDegPerPixel;
-			gPitchDeg += static_cast<float>(dy) * kRotationSpeedDegPerPixel;
-			gPitchDeg = Clamp(gPitchDeg, -89.0f, 89.0f);
+			if (IsCtrlDown(window)) {
+				gLightYawDeg += dx * kLightRotationSpeedDegPerPixel;
+				gLightPitchDeg += dy * kLightRotationSpeedDegPerPixel;
+				gLightPitchDeg = std::clamp(gLightPitchDeg, -89.0f, 89.0f);
+			} else {
+				gYawDeg += dx * kRotationSpeedDegPerPixel;
+				gPitchDeg += dy * kRotationSpeedDegPerPixel;
+				gPitchDeg = std::clamp(gPitchDeg, -89.0f, 89.0f);
+			}
 		}
 		if (gRightDown) {
-			gCameraDistance += static_cast<float>(dy) * kZoomSpeed;
+			gCameraDistance += dy * kZoomSpeed;
 			gCameraDistance = std::max(gCameraDistance, kMinCameraDistance);
 		}
 		if (gMiddleDown) {
-			gPanX += static_cast<float>(dx) * panScale;
-			gPanY -= static_cast<float>(dy) * panScale;
+			gPanX += dx * panScale;
+			gPanY -= dy * panScale;
 		}
 
 		gLastMouseX = x;
 		gLastMouseY = y;
-		glutPostRedisplay();
 	}
 
-	void MouseWheel(int, int direction, int, int) {
-		if (direction != 0) {
-			gCameraDistance -= static_cast<float>(direction) * 0.1f;
+	void Scroll(GLFWwindow*, double, double yoffset) {
+		if (yoffset != 0.0) {
+			gCameraDistance -= static_cast<float>(yoffset) * 0.2f;
 			gCameraDistance = std::max(gCameraDistance, kMinCameraDistance);
-			glutPostRedisplay();
 		}
 	}
 
-	void Keyboard(unsigned char key, int, int) {
-		if (key == 27) {
-			glutLeaveMainLoop();
+	void KeyCallback(GLFWwindow* window, int key, int, int action, int) {
+		if (action != GLFW_PRESS && action != GLFW_REPEAT) {
 			return;
 		}
-		if (key == 'p' || key == 'P') {
+		if (key == GLFW_KEY_ESCAPE) {
+			glfwSetWindowShouldClose(window, GLFW_TRUE);
+			return;
+		}
+		if (key == GLFW_KEY_P) {
 			gUsePerspective = !gUsePerspective;
 			UpdateWindowTitle();
-			glutPostRedisplay();
 			return;
 		}
-		if (key == 'r' || key == 'R') {
+		if (key == GLFW_KEY_R) {
 			gYawDeg = 0.0f;
 			gPitchDeg = 0.0f;
 			gPanX = 0.0f;
 			gPanY = 0.0f;
-			glutPostRedisplay();
+			return;
 		}
-	}
-
-	void SpecialKey(int key, int, int) {
-		if (key == GLUT_KEY_F6) {
+		if (key == GLFW_KEY_N) {
+			gShowNormals = !gShowNormals;
+			UpdateWindowTitle();
+			return;
+		}
+		if (key == GLFW_KEY_F6) {
 			if (!ReloadShaders()) {
 				std::fprintf(stderr, "F6 shader reload failed.\n");
 			} else {
 				std::fprintf(stdout, "Shaders reloaded.\n");
-				glutPostRedisplay();
 			}
+			return;
 		}
 	}
 
@@ -650,45 +858,98 @@ void main() {
 
 int main(int argc, char** argv) {
 	ParseArgs(argc, argv);
-	if (!LoadObjVertices(gObjPath, gVertexData, gBounds)) {
+	if (!LoadMesh(gObjPath, gVertices, gIndices, gBounds)) {
 		return 1;
 	}
-	gVertexCount = static_cast<int>(gVertexData.size() / 3);
+	gIndexCount = static_cast<int>(gIndices.size());
 
 	gCenter = gBounds.Center();
 	const float extent = std::max(gBounds.MaxExtent(), 1.0f);
 	gCameraDistance = extent * 2.5f;
+	gLightDistance = extent * 3.0f;
 
 	ResolveShaderPaths();
 
-	glutInit(&argc, argv);
-	glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGBA | GLUT_DEPTH);
-	glutInitWindowSize(gWindowWidth, gWindowHeight);
-	glutCreateWindow("GPURenderer - Project 2");
+	if (!glfwInit()) {
+		std::fprintf(stderr, "Failed to initialize GLFW.\n");
+		return 1;
+	}
+
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
+	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_ANY_PROFILE);
+
+	gWindow = glfwCreateWindow(gWindowWidth, gWindowHeight, "GPURenderer - Project 3", nullptr, nullptr);
+	if (!gWindow) {
+		std::fprintf(stderr, "Failed to create GLFW window.\n");
+		glfwTerminate();
+		return 1;
+	}
+	glfwMakeContextCurrent(gWindow);
+	glfwSwapInterval(1);
 
 	if (!LoadGlFunctions()) {
+		glfwDestroyWindow(gWindow);
+		glfwTerminate();
 		return 1;
 	}
 
 	glEnable(GL_DEPTH_TEST);
-	glPointSize(2.0f);
 
 	if (!ReloadShaders()) {
+		glfwDestroyWindow(gWindow);
+		glfwTerminate();
 		return 1;
 	}
+
 	CreateBuffers();
+	CreateLightBuffers();
 
-	glutDisplayFunc(Display);
-	glutReshapeFunc(Reshape);
-	glutKeyboardFunc(Keyboard);
-	glutSpecialFunc(SpecialKey);
-	glutMouseFunc(MouseButton);
-	glutMotionFunc(MouseMotion);
-	glutMouseWheelFunc(MouseWheel);
+	glfwSetFramebufferSizeCallback(gWindow, Reshape);
+	glfwSetMouseButtonCallback(gWindow, MouseButton);
+	glfwSetCursorPosCallback(gWindow, MouseMotion);
+	glfwSetScrollCallback(gWindow, Scroll);
+	glfwSetKeyCallback(gWindow, KeyCallback);
 
-	std::printf("Controls: Left drag = rotate, middle drag = pan, right drag/wheel = zoom, P = toggle projection, F6 = reload shaders.\n");
-	std::printf("Loaded %d vertices from %s\n", gVertexCount, gObjPath.c_str());
+	int fbWidth = 0;
+	int fbHeight = 0;
+	glfwGetFramebufferSize(gWindow, &fbWidth, &fbHeight);
+	Reshape(gWindow, fbWidth, fbHeight);
+	UpdateWindowTitle();
 
-	glutMainLoop();
+	std::printf("Controls: Left drag = rotate, CTRL+left drag = light rotate, middle drag = pan, right drag/wheel = zoom, P = toggle projection, N = normals, F6 = reload shaders.\n");
+	std::printf("Loaded %d triangles (%zu vertices) from %s\n", gIndexCount / 3, gVertices.size(), gObjPath.c_str());
+
+	while (!glfwWindowShouldClose(gWindow)) {
+		Display();
+		glfwSwapBuffers(gWindow);
+		glfwPollEvents();
+	}
+
+	if (pglDeleteBuffers) {
+		if (gEbo != 0) {
+			pglDeleteBuffers(1, &gEbo);
+		}
+		if (gVbo != 0) {
+			pglDeleteBuffers(1, &gVbo);
+		}
+		if (gLightVbo != 0) {
+			pglDeleteBuffers(1, &gLightVbo);
+		}
+	}
+	if (gUseVao && pglDeleteVertexArrays) {
+		if (gVao != 0) {
+			pglDeleteVertexArrays(1, &gVao);
+		}
+		if (gLightVao != 0) {
+			pglDeleteVertexArrays(1, &gLightVao);
+		}
+	}
+	if (gProgram != 0) {
+		pglDeleteProgram(gProgram);
+	}
+
+	glfwDestroyWindow(gWindow);
+	glfwTerminate();
 	return 0;
 }
