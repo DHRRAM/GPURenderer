@@ -3,7 +3,7 @@
 #
 
 # Add source to this project's executable.
-add_executable(GPURenderer "GPURenderer.cpp" "shader.vert" "shader.frag")
+add_executable(GPURenderer "GPURenderer.cpp" "shader.vert" "shader.frag" "stb_image.h")
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET GPURenderer PROPERTY CXX_STANDARD 20)

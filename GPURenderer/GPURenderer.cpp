@@ -1,6 +1,7 @@
 #include <GLFW/glfw3.h>
 
 #include <assimp/Importer.hpp>
+#include <assimp/material.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 
@@ -9,6 +10,7 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
@@ -17,7 +19,11 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
 #ifndef APIENTRYP
 #define APIENTRYP APIENTRY *
@@ -46,6 +52,18 @@
 #endif
 #ifndef GL_INFO_LOG_LENGTH
 #define GL_INFO_LOG_LENGTH 0x8B84
+#endif
+#ifndef GL_TEXTURE0
+#define GL_TEXTURE0 0x84C0
+#endif
+#ifndef GL_TEXTURE1
+#define GL_TEXTURE1 0x84C1
+#endif
+#ifndef GL_LUMINANCE
+#define GL_LUMINANCE 0x1909
+#endif
+#ifndef GL_LUMINANCE_ALPHA
+#define GL_LUMINANCE_ALPHA 0x190A
 #endif
 
 namespace {
@@ -96,12 +114,31 @@ namespace {
 	struct Vertex {
 		glm::vec3 position;
 		glm::vec3 normal;
+		glm::vec2 texcoord;
+	};
+
+	struct Material {
+		glm::vec3 ambient{0.15f, 0.15f, 0.18f};
+		glm::vec3 diffuse{0.8f, 0.7f, 0.65f};
+		glm::vec3 specular{0.9f, 0.9f, 0.9f};
+		float shininess = 64.0f;
+		GLuint diffuseTexture = 0;
+		GLuint specularTexture = 0;
+		bool hasDiffuseTexture = false;
+		bool hasSpecularTexture = false;
+	};
+
+	struct Submesh {
+		int indexOffset = 0;
+		int indexCount = 0;
+		int materialIndex = 0;
 	};
 
 	const char* kFallbackVertexShader = R"(#version 120
 
 attribute vec3 aPosition;
 attribute vec3 aNormal;
+attribute vec2 aTexCoord;
 
 uniform mat4 uMvp;
 uniform mat4 uModel;
@@ -110,20 +147,23 @@ uniform mat3 uNormalMatrix;
 
 varying vec3 vNormal;
 varying vec3 vPositionView;
+varying vec2 vTexCoord;
 
 void main() {
 	vec4 worldPos = uModel * vec4(aPosition, 1.0);
 	vec4 viewPos = uView * worldPos;
 	vPositionView = viewPos.xyz;
 	vNormal = normalize(uNormalMatrix * aNormal);
+	vTexCoord = aTexCoord;
 	gl_Position = uMvp * vec4(aPosition, 1.0);
 }
 )";
 
-	const char* kFallbackFragmentShader = R"(#version 120
+const char* kFallbackFragmentShader = R"(#version 120
 
 varying vec3 vNormal;
 varying vec3 vPositionView;
+varying vec2 vTexCoord;
 
 uniform vec3 uLightPosView;
 uniform vec3 uLightColor;
@@ -133,6 +173,10 @@ uniform vec3 uSpecularColor;
 uniform vec3 uMarkerColor;
 uniform float uShininess;
 uniform int uShadeMode;
+uniform sampler2D uDiffuseMap;
+uniform sampler2D uSpecularMap;
+uniform int uUseDiffuseMap;
+uniform int uUseSpecularMap;
 
 void main() {
 	if (uShadeMode == 1) {
@@ -146,15 +190,29 @@ void main() {
 
 	vec3 n = normalize(vNormal);
 	vec3 lightDir = normalize(uLightPosView - vPositionView);
-	float diff = max(dot(n, lightDir), 0.0);
+	float cosTheta = dot(n, lightDir);
+	float diff = max(cosTheta, 0.0);
+	float spec = 0.0;
+	if (diff > 0.0) {
+		vec3 viewDir = normalize(-vPositionView);
+		vec3 halfDir = normalize(lightDir + viewDir);
+		spec = pow(max(dot(n, halfDir), 0.0), uShininess);
+	}
 
-	vec3 viewDir = normalize(-vPositionView);
-	vec3 halfDir = normalize(lightDir + viewDir);
-	float spec = pow(max(dot(n, halfDir), 0.0), uShininess);
+	vec3 diffuseTex = (uUseDiffuseMap == 1)
+		? texture2D(uDiffuseMap, vTexCoord).rgb
+		: vec3(1.0);
+	vec3 specularTex = (uUseSpecularMap == 1)
+		? texture2D(uSpecularMap, vTexCoord).rgb
+		: vec3(1.0);
 
-	vec3 ambient = uAmbientColor * uLightColor;
-	vec3 diffuse = uDiffuseColor * diff * uLightColor;
-	vec3 specular = uSpecularColor * spec * uLightColor;
+	vec3 diffuseColor = (uUseDiffuseMap == 1) ? diffuseTex : uDiffuseColor;
+	vec3 specularColor = uSpecularColor * specularTex;
+
+	vec3 ambientColor = (uUseDiffuseMap == 1) ? (diffuseTex * uAmbientColor) : uAmbientColor;
+	vec3 ambient = ambientColor * uLightColor;
+	vec3 diffuse = diffuseColor * diff * uLightColor;
+	vec3 specular = specularColor * spec * uLightColor;
 
 	gl_FragColor = vec4(ambient + diffuse + specular, 1.0);
 }
@@ -177,6 +235,8 @@ void main() {
 	float gLightPitchDeg = 20.0f;
 	float gLightDistance = 6.0f;
 	bool gShowNormals = false;
+	float gNearPlane = kNearPlane;
+	float gFarPlane = kFarPlane;
 
 	std::string gObjPath;
 	std::string gVertexShaderPath;
@@ -184,6 +244,9 @@ void main() {
 
 	std::vector<Vertex> gVertices;
 	std::vector<unsigned int> gIndices;
+	std::vector<Submesh> gSubmeshes;
+	std::vector<Material> gMaterials;
+	std::unordered_map<std::string, GLuint> gTextureCache;
 	int gIndexCount = 0;
 	Bounds gBounds;
 	glm::vec3 gCenter(0.0f);
@@ -207,6 +270,10 @@ void main() {
 	GLint gMarkerColorLocation = -1;
 	GLint gShininessLocation = -1;
 	GLint gShadeModeLocation = -1;
+	GLint gDiffuseMapLocation = -1;
+	GLint gSpecularMapLocation = -1;
+	GLint gUseDiffuseMapLocation = -1;
+	GLint gUseSpecularMapLocation = -1;
 	bool gUseVao = false;
 
 	using GlGenVertexArraysProc = void (APIENTRYP)(GLsizei, GLuint*);
@@ -236,6 +303,7 @@ void main() {
 	using GlUniform3fvProc = void (APIENTRYP)(GLint, GLsizei, const GLfloat*);
 	using GlUniform1fProc = void (APIENTRYP)(GLint, GLfloat);
 	using GlUniform1iProc = void (APIENTRYP)(GLint, GLint);
+	using GlActiveTextureProc = void (APIENTRYP)(GLenum);
 	using GlDeleteBuffersProc = void (APIENTRYP)(GLsizei, const GLuint*);
 	using GlDeleteVertexArraysProc = void (APIENTRYP)(GLsizei, const GLuint*);
 
@@ -266,6 +334,7 @@ void main() {
 	GlUniform3fvProc pglUniform3fv = nullptr;
 	GlUniform1fProc pglUniform1f = nullptr;
 	GlUniform1iProc pglUniform1i = nullptr;
+	GlActiveTextureProc pglActiveTexture = nullptr;
 	GlDeleteBuffersProc pglDeleteBuffers = nullptr;
 	GlDeleteVertexArraysProc pglDeleteVertexArrays = nullptr;
 
@@ -346,20 +415,205 @@ void main() {
 		ok &= LoadGlFunction(pglUniform3fv, "glUniform3fv");
 		ok &= LoadGlFunction(pglUniform1f, "glUniform1f");
 		ok &= LoadGlFunction(pglUniform1i, "glUniform1i");
+		ok &= LoadGlFunction(pglActiveTexture, "glActiveTexture", "glActiveTextureARB");
 		LoadOptionalGlFunction(pglDeleteBuffers, "glDeleteBuffers");
 		LoadOptionalGlFunction(pglDeleteVertexArrays, "glDeleteVertexArrays", "glDeleteVertexArraysARB");
 		return ok;
 	}
 
-	bool LoadMesh(const std::string& path, std::vector<Vertex>& vertices, std::vector<unsigned int>& indices, Bounds& bounds) {
+	glm::vec3 ToVec3(const aiColor3D& color) {
+		return glm::vec3(color.r, color.g, color.b);
+	}
+
+	void ComputeNormalsForMesh(std::vector<Vertex>& vertices,
+		const std::vector<unsigned int>& indices,
+		size_t vertexStart,
+		size_t vertexCount,
+		size_t indexOffset,
+		size_t indexCount) {
+		if (vertexCount == 0 || indexCount < 3) {
+			return;
+		}
+
+		for (size_t i = 0; i < vertexCount; ++i) {
+			vertices[vertexStart + i].normal = glm::vec3(0.0f);
+		}
+
+		for (size_t i = 0; i + 2 < indexCount; i += 3) {
+			const unsigned int i0 = indices[indexOffset + i + 0];
+			const unsigned int i1 = indices[indexOffset + i + 1];
+			const unsigned int i2 = indices[indexOffset + i + 2];
+			if (i0 < vertexStart || i1 < vertexStart || i2 < vertexStart) {
+				continue;
+			}
+			if (i0 >= vertexStart + vertexCount ||
+				i1 >= vertexStart + vertexCount ||
+				i2 >= vertexStart + vertexCount) {
+				continue;
+			}
+			const glm::vec3& p0 = vertices[i0].position;
+			const glm::vec3& p1 = vertices[i1].position;
+			const glm::vec3& p2 = vertices[i2].position;
+			const glm::vec3 n = glm::cross(p1 - p0, p2 - p0);
+			vertices[i0].normal += n;
+			vertices[i1].normal += n;
+			vertices[i2].normal += n;
+		}
+
+		for (size_t i = 0; i < vertexCount; ++i) {
+			glm::vec3& n = vertices[vertexStart + i].normal;
+			const float len2 = glm::dot(n, n);
+			if (len2 > 0.0f) {
+				n = glm::normalize(n);
+			} else {
+				n = glm::vec3(0.0f, 1.0f, 0.0f);
+			}
+		}
+	}
+
+	GLenum ChannelsToFormat(int channels) {
+		switch (channels) {
+		case 1:
+			return GL_LUMINANCE;
+		case 2:
+			return GL_LUMINANCE_ALPHA;
+		case 3:
+			return GL_RGB;
+		case 4:
+			return GL_RGBA;
+		default:
+			return GL_RGBA;
+		}
+	}
+
+	GLuint CreateTextureFromPixels(const unsigned char* pixels, int width, int height, int channels) {
+		if (!pixels || width <= 0 || height <= 0) {
+			return 0;
+		}
+		const GLenum format = ChannelsToFormat(channels);
+		GLuint tex = 0;
+		glGenTextures(1, &tex);
+		glBindTexture(GL_TEXTURE_2D, tex);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+		glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, pixels);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		return tex;
+	}
+
+	GLuint LoadTextureFromMemory(const aiTexture* texture) {
+		if (!texture) {
+			return 0;
+		}
+		if (texture->mHeight == 0) {
+			int width = 0;
+			int height = 0;
+			int channels = 0;
+			const stbi_uc* data = reinterpret_cast<const stbi_uc*>(texture->pcData);
+			stbi_uc* pixels = stbi_load_from_memory(data, static_cast<int>(texture->mWidth), &width, &height, &channels, 0);
+			if (!pixels) {
+				return 0;
+			}
+			GLuint tex = CreateTextureFromPixels(pixels, width, height, channels);
+			stbi_image_free(pixels);
+			return tex;
+		}
+
+		const int width = static_cast<int>(texture->mWidth);
+		const int height = static_cast<int>(texture->mHeight);
+		std::vector<unsigned char> pixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+		for (int y = 0; y < height; ++y) {
+			for (int x = 0; x < width; ++x) {
+				const aiTexel& texel = texture->pcData[y * width + x];
+				const size_t idx = static_cast<size_t>((y * width + x) * 4);
+				pixels[idx + 0] = texel.r;
+				pixels[idx + 1] = texel.g;
+				pixels[idx + 2] = texel.b;
+				pixels[idx + 3] = texel.a;
+			}
+		}
+		return CreateTextureFromPixels(pixels.data(), width, height, 4);
+	}
+
+	std::filesystem::path ResolveTexturePath(const std::filesystem::path& baseDir, const aiString& texturePath) {
+		if (texturePath.length == 0) {
+			return {};
+		}
+		std::filesystem::path rawPath(texturePath.C_Str());
+		if (rawPath.is_absolute()) {
+			return rawPath;
+		}
+		std::filesystem::path candidate = baseDir / rawPath;
+		if (std::filesystem::exists(candidate)) {
+			return candidate;
+		}
+		candidate = baseDir / rawPath.filename();
+		if (std::filesystem::exists(candidate)) {
+			return candidate;
+		}
+		return baseDir / rawPath;
+	}
+
+	GLuint LoadTextureFromFile(const std::filesystem::path& path) {
+		if (path.empty()) {
+			return 0;
+		}
+		const std::string key = path.lexically_normal().string();
+		auto it = gTextureCache.find(key);
+		if (it != gTextureCache.end()) {
+			return it->second;
+		}
+
+		if (!std::filesystem::exists(path)) {
+			std::fprintf(stderr, "Texture file not found: %s\n", key.c_str());
+			return 0;
+		}
+
+		int width = 0;
+		int height = 0;
+		int channels = 0;
+		stbi_uc* pixels = stbi_load(key.c_str(), &width, &height, &channels, 0);
+		if (!pixels) {
+			std::fprintf(stderr, "Failed to load texture: %s\n", key.c_str());
+			return 0;
+		}
+		GLuint tex = CreateTextureFromPixels(pixels, width, height, channels);
+		stbi_image_free(pixels);
+		if (tex != 0) {
+			gTextureCache.emplace(key, tex);
+		}
+		return tex;
+	}
+
+	bool LoadMesh(const std::string& path,
+		std::vector<Vertex>& vertices,
+		std::vector<unsigned int>& indices,
+		Bounds& bounds,
+		std::vector<Submesh>& submeshes,
+		std::vector<Material>& materials) {
 		Assimp::Importer importer;
+#ifdef AI_CONFIG_IMPORT_OBJ_FAST_VERTICES
+		importer.SetPropertyInteger(AI_CONFIG_IMPORT_OBJ_FAST_VERTICES, 1);
+#endif
+#ifdef AI_CONFIG_IMPORT_OBJ_FAST_MATERIAL
+		importer.SetPropertyInteger(AI_CONFIG_IMPORT_OBJ_FAST_MATERIAL, 1);
+#endif
+		const unsigned int flags =
+			aiProcess_Triangulate |
+			aiProcess_JoinIdenticalVertices;
+		const auto importStart = std::chrono::steady_clock::now();
+		std::printf("Assimp import starting...\n");
+		std::fflush(stdout);
 		const aiScene* scene = importer.ReadFile(
 			path,
-			aiProcess_Triangulate |
-			aiProcess_GenSmoothNormals |
-			aiProcess_JoinIdenticalVertices |
-			aiProcess_ImproveCacheLocality |
-			aiProcess_PreTransformVertices);
+			flags);
+		const auto importEnd = std::chrono::steady_clock::now();
+		const double importSeconds = std::chrono::duration<double>(importEnd - importStart).count();
+		std::printf("Assimp import finished in %.2f seconds.\n", importSeconds);
+		std::fflush(stdout);
 
 		if (!scene || !scene->HasMeshes()) {
 			std::fprintf(stderr, "Assimp failed to load mesh: %s\n", importer.GetErrorString());
@@ -368,30 +622,135 @@ void main() {
 
 		vertices.clear();
 		indices.clear();
+		submeshes.clear();
+		materials.clear();
 		bounds = Bounds{};
 
+		std::filesystem::path objPath(path);
+		if (objPath.is_relative()) {
+			objPath = std::filesystem::absolute(objPath);
+		}
+		const std::filesystem::path baseDir = objPath.parent_path();
+
+		if (scene->mNumMaterials == 0) {
+			materials.emplace_back();
+		} else {
+			materials.resize(scene->mNumMaterials);
+			for (unsigned int matIndex = 0; matIndex < scene->mNumMaterials; ++matIndex) {
+				const aiMaterial* material = scene->mMaterials[matIndex];
+				if (!material) {
+					continue;
+				}
+
+				auto loadTexture = [&](aiTextureType type, const char* label, GLuint& outTex, bool& hasTex) -> bool {
+					aiString texPath;
+					if (material->GetTextureCount(type) == 0 ||
+						material->GetTexture(type, 0, &texPath) != AI_SUCCESS) {
+						return false;
+					}
+
+					if (texPath.length > 0 && texPath.C_Str()[0] == '*') {
+						const int texIndex = std::atoi(texPath.C_Str() + 1);
+						if (texIndex >= 0 && static_cast<unsigned int>(texIndex) < scene->mNumTextures) {
+							const std::string key = "*" + std::to_string(texIndex);
+							auto it = gTextureCache.find(key);
+							if (it != gTextureCache.end()) {
+								outTex = it->second;
+							} else {
+								outTex = LoadTextureFromMemory(scene->mTextures[texIndex]);
+								if (outTex != 0) {
+									gTextureCache.emplace(key, outTex);
+								}
+							}
+						}
+					} else {
+						const std::filesystem::path resolved = ResolveTexturePath(baseDir, texPath);
+						outTex = LoadTextureFromFile(resolved);
+					}
+
+					hasTex = outTex != 0;
+					if (!hasTex) {
+						std::fprintf(stderr, "Material %u %s texture failed: %s\n",
+							matIndex,
+							label,
+							texPath.C_Str());
+					}
+					return hasTex;
+				};
+
+				Material mat;
+				aiColor3D color(0.0f, 0.0f, 0.0f);
+				if (material->Get(AI_MATKEY_COLOR_AMBIENT, color) == AI_SUCCESS) {
+					mat.ambient = ToVec3(color);
+				}
+				if (material->Get(AI_MATKEY_COLOR_DIFFUSE, color) == AI_SUCCESS) {
+					mat.diffuse = ToVec3(color);
+				}
+				if (material->Get(AI_MATKEY_COLOR_SPECULAR, color) == AI_SUCCESS) {
+					mat.specular = ToVec3(color);
+				}
+				float shininess = 0.0f;
+				if (material->Get(AI_MATKEY_SHININESS, shininess) == AI_SUCCESS && shininess > 0.0f) {
+					mat.shininess = shininess;
+				}
+
+				if (!loadTexture(aiTextureType_DIFFUSE, "diffuse", mat.diffuseTexture, mat.hasDiffuseTexture)) {
+					if (!loadTexture(aiTextureType_BASE_COLOR, "base_color", mat.diffuseTexture, mat.hasDiffuseTexture)) {
+						loadTexture(aiTextureType_AMBIENT, "ambient", mat.diffuseTexture, mat.hasDiffuseTexture);
+					}
+				}
+
+				if (!loadTexture(aiTextureType_SPECULAR, "specular", mat.specularTexture, mat.hasSpecularTexture)) {
+					if (!loadTexture(aiTextureType_SHININESS, "shininess", mat.specularTexture, mat.hasSpecularTexture)) {
+						if (!loadTexture(aiTextureType_METALNESS, "metalness", mat.specularTexture, mat.hasSpecularTexture)) {
+							loadTexture(aiTextureType_REFLECTION, "reflection", mat.specularTexture, mat.hasSpecularTexture);
+						}
+					}
+				}
+				if (mat.hasSpecularTexture) {
+					const float maxSpec = std::max(mat.specular.x, std::max(mat.specular.y, mat.specular.z));
+					if (maxSpec <= 0.001f) {
+						mat.specular = glm::vec3(1.0f);
+					}
+				}
+
+				materials[matIndex] = mat;
+			}
+		}
+
+		const auto buildStart = std::chrono::steady_clock::now();
 		for (unsigned int meshIndex = 0; meshIndex < scene->mNumMeshes; ++meshIndex) {
 			const aiMesh* mesh = scene->mMeshes[meshIndex];
 			if (!mesh || mesh->mNumVertices == 0) {
 				continue;
 			}
+			if (!mesh->HasTextureCoords(0)) {
+				std::fprintf(stderr, "Mesh %u has no texture coordinates.\n", meshIndex);
+			}
+			const bool hasNormals = mesh->HasNormals();
 
 			const unsigned int baseIndex = static_cast<unsigned int>(vertices.size());
 			vertices.reserve(vertices.size() + mesh->mNumVertices);
 
 			for (unsigned int i = 0; i < mesh->mNumVertices; ++i) {
 				const aiVector3D pos = mesh->mVertices[i];
-				aiVector3D normal(0.0f, 1.0f, 0.0f);
-				if (mesh->HasNormals()) {
+				aiVector3D normal(0.0f, 0.0f, 0.0f);
+				if (hasNormals) {
 					normal = mesh->mNormals[i];
+				}
+				aiVector3D uv(0.0f, 0.0f, 0.0f);
+				if (mesh->HasTextureCoords(0)) {
+					uv = mesh->mTextureCoords[0][i];
 				}
 				Vertex vertex;
 				vertex.position = glm::vec3(pos.x, pos.y, pos.z);
 				vertex.normal = glm::vec3(normal.x, normal.y, normal.z);
+				vertex.texcoord = glm::vec2(uv.x, uv.y);
 				vertices.push_back(vertex);
 				bounds.Expand(vertex.position);
 			}
 
+			const unsigned int indexOffset = static_cast<unsigned int>(indices.size());
 			for (unsigned int i = 0; i < mesh->mNumFaces; ++i) {
 				const aiFace& face = mesh->mFaces[i];
 				if (face.mNumIndices != 3) {
@@ -401,12 +760,38 @@ void main() {
 				indices.push_back(baseIndex + face.mIndices[1]);
 				indices.push_back(baseIndex + face.mIndices[2]);
 			}
+
+			const unsigned int indexCount = static_cast<unsigned int>(indices.size()) - indexOffset;
+			if (!hasNormals && indexCount > 0) {
+				ComputeNormalsForMesh(
+					vertices,
+					indices,
+					baseIndex,
+					mesh->mNumVertices,
+					indexOffset,
+					indexCount);
+			}
+			if (indexCount > 0) {
+				Submesh submesh;
+				submesh.indexOffset = static_cast<int>(indexOffset);
+				submesh.indexCount = static_cast<int>(indexCount);
+				if (mesh->mMaterialIndex < materials.size()) {
+					submesh.materialIndex = static_cast<int>(mesh->mMaterialIndex);
+				} else {
+					submesh.materialIndex = 0;
+				}
+				submeshes.push_back(submesh);
+			}
 		}
 
 		if (!bounds.valid || vertices.empty() || indices.empty()) {
 			std::fprintf(stderr, "Mesh contained no valid triangles: %s\n", path.c_str());
 			return false;
 		}
+		const auto buildEnd = std::chrono::steady_clock::now();
+		const double buildSeconds = std::chrono::duration<double>(buildEnd - buildStart).count();
+		std::printf("Mesh build finished in %.2f seconds.\n", buildSeconds);
+		std::fflush(stdout);
 
 		return true;
 	}
@@ -440,6 +825,7 @@ void main() {
 		pglAttachShader(program, fragmentShader);
 		pglBindAttribLocation(program, 0, "aPosition");
 		pglBindAttribLocation(program, 1, "aNormal");
+		pglBindAttribLocation(program, 2, "aTexCoord");
 		pglLinkProgram(program);
 
 		GLint status = 0;
@@ -505,6 +891,19 @@ void main() {
 		gMarkerColorLocation = pglGetUniformLocation(gProgram, "uMarkerColor");
 		gShininessLocation = pglGetUniformLocation(gProgram, "uShininess");
 		gShadeModeLocation = pglGetUniformLocation(gProgram, "uShadeMode");
+		gDiffuseMapLocation = pglGetUniformLocation(gProgram, "uDiffuseMap");
+		gSpecularMapLocation = pglGetUniformLocation(gProgram, "uSpecularMap");
+		gUseDiffuseMapLocation = pglGetUniformLocation(gProgram, "uUseDiffuseMap");
+		gUseSpecularMapLocation = pglGetUniformLocation(gProgram, "uUseSpecularMap");
+
+		pglUseProgram(gProgram);
+		if (gDiffuseMapLocation >= 0) {
+			pglUniform1i(gDiffuseMapLocation, 0);
+		}
+		if (gSpecularMapLocation >= 0) {
+			pglUniform1i(gSpecularMapLocation, 1);
+		}
+		pglUseProgram(0);
 		return true;
 	}
 
@@ -534,6 +933,8 @@ void main() {
 		pglVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
 		pglEnableVertexAttribArray(1);
 		pglVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
+		pglEnableVertexAttribArray(2);
+		pglVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, texcoord)));
 
 		if (gUseVao) {
 			pglBindVertexArray(0);
@@ -543,7 +944,8 @@ void main() {
 	void CreateLightBuffers() {
 		const Vertex lightVertex{
 			glm::vec3(0.0f, 0.0f, 0.0f),
-			glm::vec3(0.0f, 1.0f, 0.0f)
+			glm::vec3(0.0f, 1.0f, 0.0f),
+			glm::vec2(0.0f, 0.0f)
 		};
 
 		if (gUseVao) {
@@ -559,6 +961,8 @@ void main() {
 		pglVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
 		pglEnableVertexAttribArray(1);
 		pglVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
+		pglEnableVertexAttribArray(2);
+		pglVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, texcoord)));
 
 		if (gUseVao) {
 			pglBindVertexArray(0);
@@ -589,11 +993,11 @@ void main() {
 			? static_cast<float>(gWindowWidth) / static_cast<float>(gWindowHeight)
 			: 1.0f;
 		if (gUsePerspective) {
-			return glm::perspective(glm::radians(kDefaultFovDeg), aspect, kNearPlane, kFarPlane);
+			return glm::perspective(glm::radians(kDefaultFovDeg), aspect, gNearPlane, gFarPlane);
 		}
 
 		const float size = 1.0f;
-		return glm::ortho(-size * aspect, size * aspect, -size, size, -kFarPlane, kFarPlane);
+		return glm::ortho(-size * aspect, size * aspect, -size, size, -gFarPlane, gFarPlane);
 	}
 
 	glm::vec3 ComputeLightPosition(const glm::mat4& model) {
@@ -614,7 +1018,7 @@ void main() {
 		const char* mode = gUsePerspective ? "Perspective" : "Orthographic";
 		const char* shade = gShowNormals ? "Normals" : "Blinn";
 		char title[160];
-		std::snprintf(title, sizeof(title), "GPURenderer - Project 3 | %s | %s", mode, shade);
+		std::snprintf(title, sizeof(title), "GPURenderer - Project 4 | %s | %s", mode, shade);
 		glfwSetWindowTitle(gWindow, title);
 	}
 
@@ -650,28 +1054,12 @@ void main() {
 		const glm::vec3 lightPosWorld = ComputeLightPosition(model);
 		const glm::vec3 lightPosView = glm::vec3(view * glm::vec4(lightPosWorld, 1.0f));
 		const glm::vec3 lightColor(1.0f, 1.0f, 1.0f);
-		const glm::vec3 ambient(0.15f, 0.15f, 0.18f);
-		const glm::vec3 diffuse(0.8f, 0.7f, 0.65f);
-		const glm::vec3 specular(0.9f, 0.9f, 0.9f);
-		const float shininess = 64.0f;
 
 		if (gLightPosLocation >= 0) {
 			pglUniform3fv(gLightPosLocation, 1, glm::value_ptr(lightPosView));
 		}
 		if (gLightColorLocation >= 0) {
 			pglUniform3fv(gLightColorLocation, 1, glm::value_ptr(lightColor));
-		}
-		if (gAmbientLocation >= 0) {
-			pglUniform3fv(gAmbientLocation, 1, glm::value_ptr(ambient));
-		}
-		if (gDiffuseLocation >= 0) {
-			pglUniform3fv(gDiffuseLocation, 1, glm::value_ptr(diffuse));
-		}
-		if (gSpecularLocation >= 0) {
-			pglUniform3fv(gSpecularLocation, 1, glm::value_ptr(specular));
-		}
-		if (gShininessLocation >= 0) {
-			pglUniform1f(gShininessLocation, shininess);
 		}
 		if (gShadeModeLocation >= 0) {
 			pglUniform1i(gShadeModeLocation, gShowNormals ? 1 : 0);
@@ -686,9 +1074,58 @@ void main() {
 			pglVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
 			pglEnableVertexAttribArray(1);
 			pglVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
+			pglEnableVertexAttribArray(2);
+			pglVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, texcoord)));
 		}
 
-		glDrawElements(GL_TRIANGLES, gIndexCount, GL_UNSIGNED_INT, nullptr);
+		auto applyMaterial = [&](const Material& material) {
+			if (gAmbientLocation >= 0) {
+				pglUniform3fv(gAmbientLocation, 1, glm::value_ptr(material.ambient));
+			}
+			if (gDiffuseLocation >= 0) {
+				pglUniform3fv(gDiffuseLocation, 1, glm::value_ptr(material.diffuse));
+			}
+			if (gSpecularLocation >= 0) {
+				pglUniform3fv(gSpecularLocation, 1, glm::value_ptr(material.specular));
+			}
+			if (gShininessLocation >= 0) {
+				pglUniform1f(gShininessLocation, material.shininess);
+			}
+			if (gUseDiffuseMapLocation >= 0) {
+				pglUniform1i(gUseDiffuseMapLocation, material.hasDiffuseTexture ? 1 : 0);
+			}
+			if (gUseSpecularMapLocation >= 0) {
+				pglUniform1i(gUseSpecularMapLocation, material.hasSpecularTexture ? 1 : 0);
+			}
+			if (pglActiveTexture) {
+				pglActiveTexture(GL_TEXTURE0);
+			}
+			glBindTexture(GL_TEXTURE_2D, material.hasDiffuseTexture ? material.diffuseTexture : 0);
+			if (pglActiveTexture) {
+				pglActiveTexture(GL_TEXTURE1);
+			}
+			glBindTexture(GL_TEXTURE_2D, material.hasSpecularTexture ? material.specularTexture : 0);
+		};
+
+		int lastMaterial = -1;
+		if (gSubmeshes.empty()) {
+			const Material& fallback = gMaterials.empty() ? Material{} : gMaterials.front();
+			applyMaterial(fallback);
+			glDrawElements(GL_TRIANGLES, gIndexCount, GL_UNSIGNED_INT, nullptr);
+		} else {
+			for (const Submesh& submesh : gSubmeshes) {
+				const int matIndex = (submesh.materialIndex >= 0 && submesh.materialIndex < static_cast<int>(gMaterials.size()))
+					? submesh.materialIndex
+					: 0;
+				if (matIndex != lastMaterial) {
+					const Material& material = gMaterials.empty() ? Material{} : gMaterials[matIndex];
+					applyMaterial(material);
+					lastMaterial = matIndex;
+				}
+				const void* offset = reinterpret_cast<const void*>(static_cast<size_t>(submesh.indexOffset) * sizeof(unsigned int));
+				glDrawElements(GL_TRIANGLES, submesh.indexCount, GL_UNSIGNED_INT, offset);
+			}
+		}
 
 		if (gUseVao && gVao != 0) {
 			pglBindVertexArray(0);
@@ -725,6 +1162,8 @@ void main() {
 				pglVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
 				pglEnableVertexAttribArray(1);
 				pglVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
+				pglEnableVertexAttribArray(2);
+				pglVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, texcoord)));
 			}
 
 			glDrawArrays(GL_POINTS, 0, 1);
@@ -858,16 +1297,7 @@ void main() {
 
 int main(int argc, char** argv) {
 	ParseArgs(argc, argv);
-	if (!LoadMesh(gObjPath, gVertices, gIndices, gBounds)) {
-		return 1;
-	}
-	gIndexCount = static_cast<int>(gIndices.size());
-
-	gCenter = gBounds.Center();
-	const float extent = std::max(gBounds.MaxExtent(), 1.0f);
-	gCameraDistance = extent * 2.5f;
-	gLightDistance = extent * 3.0f;
-
+	stbi_set_flip_vertically_on_load(true);
 	ResolveShaderPaths();
 
 	if (!glfwInit()) {
@@ -878,8 +1308,9 @@ int main(int argc, char** argv) {
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
 	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_ANY_PROFILE);
+	glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
 
-	gWindow = glfwCreateWindow(gWindowWidth, gWindowHeight, "GPURenderer - Project 3", nullptr, nullptr);
+	gWindow = glfwCreateWindow(gWindowWidth, gWindowHeight, "GPURenderer - Project 4", nullptr, nullptr);
 	if (!gWindow) {
 		std::fprintf(stderr, "Failed to create GLFW window.\n");
 		glfwTerminate();
@@ -895,6 +1326,23 @@ int main(int argc, char** argv) {
 	}
 
 	glEnable(GL_DEPTH_TEST);
+	glEnable(GL_TEXTURE_2D);
+
+	std::printf("Loading mesh...\n");
+	std::fflush(stdout);
+	if (!LoadMesh(gObjPath, gVertices, gIndices, gBounds, gSubmeshes, gMaterials)) {
+		glfwDestroyWindow(gWindow);
+		glfwTerminate();
+		return 1;
+	}
+	gIndexCount = static_cast<int>(gIndices.size());
+
+	gCenter = gBounds.Center();
+	const float extent = std::max(gBounds.MaxExtent(), 1.0f);
+	gCameraDistance = extent * 2.5f;
+	gLightDistance = extent * 3.0f;
+	gNearPlane = std::max(0.1f, extent * 0.001f);
+	gFarPlane = std::max(kFarPlane, gCameraDistance + extent * 3.0f);
 
 	if (!ReloadShaders()) {
 		glfwDestroyWindow(gWindow);
@@ -916,6 +1364,8 @@ int main(int argc, char** argv) {
 	glfwGetFramebufferSize(gWindow, &fbWidth, &fbHeight);
 	Reshape(gWindow, fbWidth, fbHeight);
 	UpdateWindowTitle();
+	glfwShowWindow(gWindow);
+	glfwFocusWindow(gWindow);
 
 	std::printf("Controls: Left drag = rotate, CTRL+left drag = light rotate, middle drag = pan, right drag/wheel = zoom, P = toggle projection, N = normals, F6 = reload shaders.\n");
 	std::printf("Loaded %d triangles (%zu vertices) from %s\n", gIndexCount / 3, gVertices.size(), gObjPath.c_str());
@@ -947,6 +1397,18 @@ int main(int argc, char** argv) {
 	}
 	if (gProgram != 0) {
 		pglDeleteProgram(gProgram);
+	}
+	if (!gTextureCache.empty()) {
+		std::vector<GLuint> textures;
+		textures.reserve(gTextureCache.size());
+		for (const auto& entry : gTextureCache) {
+			if (entry.second != 0) {
+				textures.push_back(entry.second);
+			}
+		}
+		if (!textures.empty()) {
+			glDeleteTextures(static_cast<GLsizei>(textures.size()), textures.data());
+		}
 	}
 
 	glfwDestroyWindow(gWindow);
