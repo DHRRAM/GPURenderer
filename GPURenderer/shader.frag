@@ -16,6 +16,7 @@ uniform sampler2D uDiffuseMap;
 uniform sampler2D uSpecularMap;
 uniform int uUseDiffuseMap;
 uniform int uUseSpecularMap;
+uniform vec3 uPlaneColorBias;
 
 void main() {
 	if (uShadeMode == 1) {
@@ -24,6 +25,11 @@ void main() {
 	}
 	if (uShadeMode == 2) {
 		gl_FragColor = vec4(uMarkerColor, 1.0);
+		return;
+	}
+	if (uShadeMode == 3) {
+		vec3 planeColor = texture2D(uDiffuseMap, vTexCoord).rgb + uPlaneColorBias;
+		gl_FragColor = vec4(clamp(planeColor, 0.0, 1.0), 1.0);
 		return;
 	}
 
