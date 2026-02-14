@@ -117,6 +117,9 @@ namespace {
 	constexpr float kFarPlane = 500.0f;
 	constexpr float kLightMarkerPointSize = 8.0f;
 	constexpr float kPlaneColorBias = 0.045f;
+	constexpr float kGuiPanelViewportPaddingFraction = 0.01f;
+	constexpr float kGuiPanelMinWidth = 280.0f;
+	constexpr float kGuiPanelMinHeight = 200.0f;
 	constexpr float kGuiPanelWidth = 460.0f;
 	constexpr float kGuiPanelHeight = 500.0f;
 	constexpr size_t kMaxObjPathLength = 1024;
@@ -1974,11 +1977,81 @@ void main() {
 			return;
 		}
 
-		ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_Always);
+		const ImGuiIO& io = ImGui::GetIO();
+		const float viewportWidth = std::max(1.0f, io.DisplaySize.x);
+		const float viewportHeight = std::max(1.0f, io.DisplaySize.y);
+		const float paddingX = viewportWidth * kGuiPanelViewportPaddingFraction;
+		const float paddingY = viewportHeight * kGuiPanelViewportPaddingFraction;
+		const float minX = paddingX;
+		const float minY = paddingY;
+		const float maxRight = viewportWidth - paddingX;
+		const float maxBottom = viewportHeight - paddingY;
+		const float availableWidth = std::max(1.0f, maxRight - minX);
+		const float availableHeight = std::max(1.0f, maxBottom - minY);
+		const ImVec2 minPanelSize(
+			std::min(kGuiPanelMinWidth, availableWidth),
+			std::min(kGuiPanelMinHeight, availableHeight));
+		const ImVec2 maxPanelSize(
+			availableWidth,
+			availableHeight);
+		const ImVec2 initialPos(
+			std::max(12.0f, minX),
+			std::max(12.0f, minY));
+
+		ImGui::SetNextWindowPos(initialPos, ImGuiCond_FirstUseEver);
 		ImGui::SetNextWindowSize(ImVec2(kGuiPanelWidth, kGuiPanelHeight), ImGuiCond_FirstUseEver);
+		ImGui::SetNextWindowSizeConstraints(minPanelSize, maxPanelSize);
 		if (!ImGui::Begin("Renderer Controls")) {
 			ImGui::End();
 			return;
+		}
+
+		// Keep the GUI fully inside the viewport and preserve the opposite edge while resizing.
+		ImVec2 windowPos = ImGui::GetWindowPos();
+		ImVec2 windowSize = ImGui::GetWindowSize();
+		windowSize.x = std::clamp(windowSize.x, minPanelSize.x, maxPanelSize.x);
+		windowSize.y = std::clamp(windowSize.y, minPanelSize.y, maxPanelSize.y);
+		const ImGuiMouseCursor mouseCursor = ImGui::GetMouseCursor();
+		const bool resizeX = io.MouseDown[ImGuiMouseButton_Left] &&
+			(mouseCursor == ImGuiMouseCursor_ResizeEW ||
+				mouseCursor == ImGuiMouseCursor_ResizeNWSE ||
+				mouseCursor == ImGuiMouseCursor_ResizeNESW);
+		const bool resizeY = io.MouseDown[ImGuiMouseButton_Left] &&
+			(mouseCursor == ImGuiMouseCursor_ResizeNS ||
+				mouseCursor == ImGuiMouseCursor_ResizeNWSE ||
+				mouseCursor == ImGuiMouseCursor_ResizeNESW);
+
+		if (windowPos.x < minX) {
+			if (resizeX) {
+				windowSize.x = std::clamp(windowSize.x + (windowPos.x - minX), minPanelSize.x, maxPanelSize.x);
+			}
+			windowPos.x = minX;
+		}
+		if (windowPos.x + windowSize.x > maxRight) {
+			if (resizeX) {
+				windowSize.x = std::clamp(maxRight - windowPos.x, minPanelSize.x, maxPanelSize.x);
+			}
+			windowPos.x = std::clamp(windowPos.x, minX, std::max(minX, maxRight - windowSize.x));
+		}
+
+		if (windowPos.y < minY) {
+			if (resizeY) {
+				windowSize.y = std::clamp(windowSize.y + (windowPos.y - minY), minPanelSize.y, maxPanelSize.y);
+			}
+			windowPos.y = minY;
+		}
+		if (windowPos.y + windowSize.y > maxBottom) {
+			if (resizeY) {
+				windowSize.y = std::clamp(maxBottom - windowPos.y, minPanelSize.y, maxPanelSize.y);
+			}
+			windowPos.y = std::clamp(windowPos.y, minY, std::max(minY, maxBottom - windowSize.y));
+		}
+
+		if (std::abs(windowSize.x - ImGui::GetWindowSize().x) > 0.5f || std::abs(windowSize.y - ImGui::GetWindowSize().y) > 0.5f) {
+			ImGui::SetWindowSize(windowSize);
+		}
+		if (std::abs(windowPos.x - ImGui::GetWindowPos().x) > 0.5f || std::abs(windowPos.y - ImGui::GetWindowPos().y) > 0.5f) {
+			ImGui::SetWindowPos(windowPos);
 		}
 
 		ImGui::Checkbox("Render To Plane", &gRenderToPlane);
