@@ -8,7 +8,7 @@ namespace gpurenderer {
 	namespace config {
 		inline constexpr int kDefaultWindowWidth = 1500;
 		inline constexpr int kDefaultWindowHeight = 520;
-		inline constexpr const char* kWindowTitleBase = "GPURenderer - Project 5";
+		inline constexpr const char* kWindowTitleBase = "GPURenderer - Project 7";
 		inline constexpr const char* kUsageFormat = "Usage: %s <model.obj> [width height]\n";
 	}
 

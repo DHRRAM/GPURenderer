@@ -70,6 +70,33 @@
 #ifndef GL_TEXTURE1
 #define GL_TEXTURE1 0x84C1
 #endif
+#ifndef GL_TEXTURE2
+#define GL_TEXTURE2 0x84C2
+#endif
+#ifndef GL_TEXTURE3
+#define GL_TEXTURE3 0x84C3
+#endif
+#ifndef GL_TEXTURE_CUBE_MAP
+#define GL_TEXTURE_CUBE_MAP 0x8513
+#endif
+#ifndef GL_TEXTURE_CUBE_MAP_POSITIVE_X
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_X 0x8515
+#endif
+#ifndef GL_TEXTURE_CUBE_MAP_NEGATIVE_X
+#define GL_TEXTURE_CUBE_MAP_NEGATIVE_X 0x8516
+#endif
+#ifndef GL_TEXTURE_CUBE_MAP_POSITIVE_Y
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_Y 0x8517
+#endif
+#ifndef GL_TEXTURE_CUBE_MAP_NEGATIVE_Y
+#define GL_TEXTURE_CUBE_MAP_NEGATIVE_Y 0x8518
+#endif
+#ifndef GL_TEXTURE_CUBE_MAP_POSITIVE_Z
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_Z 0x8519
+#endif
+#ifndef GL_TEXTURE_CUBE_MAP_NEGATIVE_Z
+#define GL_TEXTURE_CUBE_MAP_NEGATIVE_Z 0x851A
+#endif
 #ifndef GL_LUMINANCE
 #define GL_LUMINANCE 0x1909
 #endif
@@ -94,8 +121,14 @@
 #ifndef GL_DEPTH_COMPONENT24
 #define GL_DEPTH_COMPONENT24 0x81A6
 #endif
+#ifndef GL_DEPTH_COMPONENT
+#define GL_DEPTH_COMPONENT 0x1902
+#endif
 #ifndef GL_CLAMP_TO_EDGE
 #define GL_CLAMP_TO_EDGE 0x812F
+#endif
+#ifndef GL_TEXTURE_WRAP_R
+#define GL_TEXTURE_WRAP_R 0x8072
 #endif
 #ifndef GL_LINEAR_MIPMAP_LINEAR
 #define GL_LINEAR_MIPMAP_LINEAR 0x2703
@@ -105,6 +138,12 @@
 #endif
 #ifndef GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
 #define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT 0x84FF
+#endif
+#ifndef GL_NONE
+#define GL_NONE 0
+#endif
+#ifndef GL_POLYGON_OFFSET_FILL
+#define GL_POLYGON_OFFSET_FILL 0x8037
 #endif
 
 namespace {
@@ -116,13 +155,48 @@ namespace {
 	constexpr float kNearPlane = 0.1f;
 	constexpr float kFarPlane = 500.0f;
 	constexpr float kLightMarkerPointSize = 8.0f;
-	constexpr float kPlaneColorBias = 0.045f;
+	constexpr float kLightMarkerMeshScaleRatio = 0.08f;
+	constexpr float kLightMarkerMeshScaleMin = 0.08f;
+	constexpr float kPlaneColorBias = 0.015f;
+	constexpr float kPlaneAmbientStrength = 0.12f;
+	constexpr float kPlaneSpecularStrength = 0.04f;
+	constexpr float kPlaneShininess = 24.0f;
+	constexpr float kPlaneDiffuseR = 0.40f;
+	constexpr float kPlaneDiffuseG = 0.42f;
+	constexpr float kPlaneDiffuseB = 0.45f;
+	constexpr float kPlanePaddingRatio = 0.005f;
+	constexpr float kPlaneSizeMultiplier = 1.0f;
+	constexpr float kObjectEnvReflectionStrength = 1.0f;
+	constexpr float kPlaneEnvReflectionStrength = 1.0f;
+	constexpr float kPlaneRttReflectionStrength = 1.0f;
+	constexpr float kPlaneRttReflectionBrightness = 0.25f;
+	constexpr float kSkyboxDepth = 1.0f;
 	constexpr float kGuiPanelViewportPaddingFraction = 0.01f;
 	constexpr float kGuiPanelMinWidth = 280.0f;
 	constexpr float kGuiPanelMinHeight = 200.0f;
 	constexpr float kGuiPanelWidth = 460.0f;
 	constexpr float kGuiPanelHeight = 500.0f;
+	constexpr int kShadowMapResolution = 2048;
+	constexpr float kShadowBias = 0.00008f;
+	constexpr float kSpotLightInnerDeg = 18.0f;
+	constexpr float kSpotLightOuterDeg = 28.0f;
 	constexpr size_t kMaxObjPathLength = 1024;
+	const std::array<const char*, 6> kCubemapFaceFiles{
+		"cubemap_posx.png",
+		"cubemap_negx.png",
+		"cubemap_posy.png",
+		"cubemap_negy.png",
+		"cubemap_posz.png",
+		"cubemap_negz.png"
+	};
+	const std::array<GLenum, 6> kCubemapFaceTargets{
+		GL_TEXTURE_CUBE_MAP_POSITIVE_X,
+		GL_TEXTURE_CUBE_MAP_NEGATIVE_X,
+		GL_TEXTURE_CUBE_MAP_POSITIVE_Y,
+		GL_TEXTURE_CUBE_MAP_NEGATIVE_Y,
+		GL_TEXTURE_CUBE_MAP_POSITIVE_Z,
+		GL_TEXTURE_CUBE_MAP_NEGATIVE_Z
+	};
 
 	struct Bounds {
 		glm::vec3 min{0.0f};
@@ -195,6 +269,27 @@ namespace {
 		GLuint depthRenderbuffer = 0;
 		int width = 0;
 		int height = 0;
+	};
+
+	struct GLShadowMap {
+		GLuint framebuffer = 0;
+		GLuint depthTexture = 0;
+		int width = 0;
+		int height = 0;
+	};
+
+	struct GLMeshBuffers {
+		GLuint vao = 0;
+		GLuint vbo = 0;
+		GLuint ebo = 0;
+		int indexCount = 0;
+	};
+
+	enum class LightMarkerShape {
+		Point = 0,
+		Cube = 1,
+		Sphere = 2,
+		LightObject = 3
 	};
 
 	const char* kFallbackVertexShader = R"(#version 120
@@ -287,6 +382,22 @@ void main() {
 }
 )";
 
+	const char* kDepthVertexShader = R"(#version 120
+
+attribute vec3 aPosition;
+uniform mat4 uDepthMvp;
+
+void main() {
+	gl_Position = uDepthMvp * vec4(aPosition, 1.0);
+}
+)";
+
+	const char* kDepthFragmentShader = R"(#version 120
+
+void main() {
+}
+)";
+
 	int gWindowWidth = gpurenderer::config::kDefaultWindowWidth;
 	int gWindowHeight = gpurenderer::config::kDefaultWindowHeight;
 	bool gUsePerspective = true;
@@ -296,17 +407,24 @@ void main() {
 	double gLastMouseX = 0.0;
 	double gLastMouseY = 0.0;
 	OrbitCamera gObjectCamera;
-	OrbitCamera gPlaneCamera{0.0f, 0.0f, 2.8f, 0.0f, 0.0f};
 	float gLightYawDeg = 45.0f;
 	float gLightPitchDeg = 20.0f;
 	float gLightDistance = 6.0f;
 	bool gShowNormals = false;
 	float gNearPlane = kNearPlane;
 	float gFarPlane = kFarPlane;
+	float gPlaneHeight = -1.0f;
+	float gPlaneWidth = 12.0f;
+	float gPlaneLength = 12.0f;
+	float gPlaneScale = 1.0f;
+	glm::vec3 gObjectScale(1.0f, 1.0f, 1.0f);
+	float gLightMarkerScale = 1.0f;
 
 	std::string gObjPath;
 	std::string gVertexShaderPath;
 	std::string gFragmentShaderPath;
+	std::filesystem::path gAssetRoot;
+	std::string gEnvironmentLoadStatus;
 
 	std::vector<Vertex> gVertices;
 	std::vector<unsigned int> gIndices;
@@ -329,7 +447,16 @@ void main() {
 	glm::vec3 gSceneBackgroundColor(0.03f, 0.03f, 0.05f);
 	glm::vec3 gOffscreenBackgroundColor(0.05f, 0.05f, 0.08f);
 	glm::vec3 gLightColor(1.0f, 1.0f, 1.0f);
+	glm::vec3 gLightMarkerColor(1.0f, 0.9f, 0.1f);
 	float gLightIntensity = 1.0f;
+	glm::vec3 gPlaneAmbientColor(kPlaneAmbientStrength, kPlaneAmbientStrength, kPlaneAmbientStrength);
+	glm::vec3 gPlaneDiffuseColor(kPlaneDiffuseR, kPlaneDiffuseG, kPlaneDiffuseB);
+	glm::vec3 gPlaneSpecularColor(kPlaneSpecularStrength, kPlaneSpecularStrength, kPlaneSpecularStrength);
+	float gPlaneShininess = kPlaneShininess;
+	glm::vec3 gPlaneColorBias(kPlaneColorBias, kPlaneColorBias, kPlaneColorBias);
+	float gPlaneEnvReflectionStrength = kPlaneEnvReflectionStrength;
+	float gPlaneRttReflectionStrength = kPlaneRttReflectionStrength;
+	float gPlaneRttReflectionBrightness = kPlaneRttReflectionBrightness;
 	int gSelectedMaterialIndex = 0;
 	char gObjPathInput[kMaxObjPathLength]{};
 	std::vector<std::string> gAvailableObjFiles;
@@ -342,16 +469,31 @@ void main() {
 	GLuint gPlaneVbo = 0;
 	GLuint gPlaneEbo = 0;
 	int gPlaneIndexCount = 0;
+	GLuint gBackgroundVao = 0;
+	GLuint gBackgroundVbo = 0;
+	GLuint gBackgroundEbo = 0;
+	int gBackgroundIndexCount = 0;
 	GLuint gLightVao = 0;
 	GLuint gLightVbo = 0;
+	GLMeshBuffers gLightCubeMesh;
+	GLMeshBuffers gLightSphereMesh;
+	GLMeshBuffers gLightObjectMesh;
+	bool gShowLightMarker = true;
+	int gLightMarkerShape = static_cast<int>(LightMarkerShape::Point);
+	bool gHasLightObjectMesh = false;
+	std::string gLightObjectStatus;
 	GLRenderTexture gRenderTexture;
+	GLShadowMap gShadowMap;
+	GLuint gEnvironmentCubemap = 0;
 	bool gHasAnisotropicFiltering = false;
 	float gMaxAnisotropy = 1.0f;
 	GLuint gProgram = 0;
+	GLuint gDepthProgram = 0;
 	GLint gMvpLocation = -1;
 	GLint gModelLocation = -1;
 	GLint gViewLocation = -1;
 	GLint gNormalMatrixLocation = -1;
+	GLint gWorldNormalMatrixLocation = -1;
 	GLint gLightPosLocation = -1;
 	GLint gLightColorLocation = -1;
 	GLint gAmbientLocation = -1;
@@ -365,6 +507,29 @@ void main() {
 	GLint gUseDiffuseMapLocation = -1;
 	GLint gUseSpecularMapLocation = -1;
 	GLint gPlaneColorBiasLocation = -1;
+	GLint gEnvMapLocation = -1;
+	GLint gUseEnvMapLocation = -1;
+	GLint gInvViewRotationLocation = -1;
+	GLint gEnvReflectionStrengthLocation = -1;
+	GLint gPlaneReflectionStrengthLocation = -1;
+	GLint gPlaneEnvStrengthLocation = -1;
+	GLint gPlaneReflectionBrightnessLocation = -1;
+	GLint gReflectionViewProjLocation = -1;
+	GLint gLightDirLocation = -1;
+	GLint gLightViewProjLocation = -1;
+	GLint gShadowMapLocation = -1;
+	GLint gReceiveShadowsLocation = -1;
+	GLint gShadowBiasLocation = -1;
+	GLint gUseSpotLightLocation = -1;
+	GLint gSpotCosInnerLocation = -1;
+	GLint gSpotCosOuterLocation = -1;
+	GLint gDepthMvpLocation = -1;
+	glm::mat4 gLightViewProjection(1.0f);
+	glm::vec3 gLightWorldPosition(0.0f, 0.0f, 0.0f);
+	glm::vec3 gLightWorldDirection(0.0f, -1.0f, 0.0f);
+	float gShadowBias = kShadowBias;
+	float gSpotInnerDeg = kSpotLightInnerDeg;
+	float gSpotOuterDeg = kSpotLightOuterDeg;
 	bool gUseVao = false;
 
 	using GlGenVertexArraysProc = void (APIENTRYP)(GLsizei, GLuint*);
@@ -679,10 +844,6 @@ void main() {
 		return true;
 	}
 
-	int ComputeSquareOffscreenSize(int windowWidth, int windowHeight) {
-		return std::max(1, std::min(windowWidth, windowHeight));
-	}
-
 	void GenerateRenderTextureMipmaps() {
 		if (gRenderTexture.colorTexture == 0 || !pglGenerateMipmap) {
 			return;
@@ -690,6 +851,73 @@ void main() {
 		glBindTexture(GL_TEXTURE_2D, gRenderTexture.colorTexture);
 		pglGenerateMipmap(GL_TEXTURE_2D);
 		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+
+	void DestroyShadowMap() {
+		if (gShadowMap.framebuffer != 0 && pglDeleteFramebuffers) {
+			pglDeleteFramebuffers(1, &gShadowMap.framebuffer);
+		}
+		if (gShadowMap.depthTexture != 0) {
+			glDeleteTextures(1, &gShadowMap.depthTexture);
+		}
+		gShadowMap = GLShadowMap{};
+	}
+
+	bool CreateOrResizeShadowMap(int width, int height) {
+		width = std::max(width, 1);
+		height = std::max(height, 1);
+		if (gShadowMap.framebuffer != 0 &&
+			gShadowMap.depthTexture != 0 &&
+			gShadowMap.width == width &&
+			gShadowMap.height == height) {
+			return true;
+		}
+
+		DestroyShadowMap();
+		gShadowMap.width = width;
+		gShadowMap.height = height;
+
+		glGenTextures(1, &gShadowMap.depthTexture);
+		if (gShadowMap.depthTexture == 0) {
+			std::fprintf(stderr, "Failed to create shadow map depth texture.\n");
+			return false;
+		}
+		glBindTexture(GL_TEXTURE_2D, gShadowMap.depthTexture);
+		glTexImage2D(
+			GL_TEXTURE_2D,
+			0,
+			GL_DEPTH_COMPONENT24,
+			gShadowMap.width,
+			gShadowMap.height,
+			0,
+			GL_DEPTH_COMPONENT,
+			GL_UNSIGNED_INT,
+			nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glBindTexture(GL_TEXTURE_2D, 0);
+
+		pglGenFramebuffers(1, &gShadowMap.framebuffer);
+		pglBindFramebuffer(GL_FRAMEBUFFER, gShadowMap.framebuffer);
+		pglFramebufferTexture2D(
+			GL_FRAMEBUFFER,
+			GL_DEPTH_ATTACHMENT,
+			GL_TEXTURE_2D,
+			gShadowMap.depthTexture,
+			0);
+		glDrawBuffer(GL_NONE);
+		glReadBuffer(GL_NONE);
+
+		const GLenum status = pglCheckFramebufferStatus(GL_FRAMEBUFFER);
+		pglBindFramebuffer(GL_FRAMEBUFFER, 0);
+		if (status != GL_FRAMEBUFFER_COMPLETE) {
+			std::fprintf(stderr, "Shadow map framebuffer incomplete (0x%X).\n", status);
+			DestroyShadowMap();
+			return false;
+		}
+		return true;
 	}
 
 	glm::vec3 ToVec3(const aiColor3D& color) {
@@ -857,6 +1085,172 @@ void main() {
 			gTextureCache.emplace(key, tex);
 		}
 		return tex;
+	}
+
+	std::vector<std::filesystem::path> BuildAssetRootCandidates() {
+		std::vector<std::filesystem::path> candidates;
+		auto addCandidate = [&](const std::filesystem::path& path) {
+			if (path.empty()) {
+				return;
+			}
+			std::error_code ec;
+			std::filesystem::path normalized = std::filesystem::absolute(path, ec);
+			if (ec) {
+				normalized = path.lexically_normal();
+			} else {
+				normalized = normalized.lexically_normal();
+			}
+			if (std::find(candidates.begin(), candidates.end(), normalized) == candidates.end()) {
+				candidates.push_back(normalized);
+			}
+		};
+
+		std::error_code ec;
+		const std::filesystem::path cwd = std::filesystem::current_path(ec);
+		if (!gObjPath.empty()) {
+			std::filesystem::path objPath(gObjPath);
+			if (objPath.is_relative() && !cwd.empty()) {
+				objPath = cwd / objPath;
+			}
+			addCandidate(objPath.parent_path());
+		}
+
+		if (!ec) {
+			addCandidate(cwd);
+			addCandidate(cwd / "out/build/x64-release/GPURenderer");
+			addCandidate(cwd / "out/build/x64-debug/GPURenderer");
+			addCandidate(cwd / "out/x64-release");
+			addCandidate(cwd / "out/x64-debug");
+		}
+
+		return candidates;
+	}
+
+	std::filesystem::path ResolveCubeObjPath(const std::filesystem::path& root) {
+		const std::filesystem::path nested = root / "cube" / "cube.obj";
+		if (std::filesystem::exists(nested)) {
+			return nested;
+		}
+		const std::filesystem::path flat = root / "cube.obj";
+		if (std::filesystem::exists(flat)) {
+			return flat;
+		}
+		return {};
+	}
+
+	std::filesystem::path ResolveLightObjPath(const std::filesystem::path& root) {
+		const std::filesystem::path nested = root / "light" / "light.obj";
+		if (std::filesystem::exists(nested)) {
+			return nested;
+		}
+		const std::filesystem::path flat = root / "light.obj";
+		if (std::filesystem::exists(flat)) {
+			return flat;
+		}
+		return {};
+	}
+
+	std::array<std::filesystem::path, 6> BuildCubemapFacePaths(const std::filesystem::path& root) {
+		std::array<std::filesystem::path, 6> faces{};
+		for (size_t i = 0; i < faces.size(); ++i) {
+			faces[i] = root / "cubemap" / kCubemapFaceFiles[i];
+		}
+		return faces;
+	}
+
+	std::filesystem::path ResolveEnvironmentAssetRoot() {
+		const std::vector<std::filesystem::path> candidates = BuildAssetRootCandidates();
+		for (const std::filesystem::path& root : candidates) {
+			const std::filesystem::path cubePath = ResolveCubeObjPath(root);
+			if (cubePath.empty()) {
+				continue;
+			}
+			const auto cubemapFaces = BuildCubemapFacePaths(root);
+			bool allFacesFound = true;
+			for (const std::filesystem::path& face : cubemapFaces) {
+				if (!std::filesystem::exists(face)) {
+					allFacesFound = false;
+					break;
+				}
+			}
+			if (allFacesFound) {
+				return root;
+			}
+		}
+		return {};
+	}
+
+	bool LoadCubemapTexture(const std::filesystem::path& root) {
+		const auto facePaths = BuildCubemapFacePaths(root);
+		for (const std::filesystem::path& face : facePaths) {
+			if (!std::filesystem::exists(face)) {
+				std::fprintf(stderr, "Cubemap face missing: %s\n", face.string().c_str());
+				return false;
+			}
+		}
+
+		GLuint cubemap = 0;
+		glGenTextures(1, &cubemap);
+		if (cubemap == 0) {
+			return false;
+		}
+
+		glBindTexture(GL_TEXTURE_CUBE_MAP, cubemap);
+		stbi_set_flip_vertically_on_load(false);
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+		bool success = true;
+		for (size_t i = 0; i < facePaths.size(); ++i) {
+			int width = 0;
+			int height = 0;
+			int channels = 0;
+			const std::string facePath = facePaths[i].string();
+			stbi_uc* pixels = stbi_load(facePath.c_str(), &width, &height, &channels, 0);
+			if (!pixels) {
+				std::fprintf(stderr, "Failed to load cubemap face: %s\n", facePath.c_str());
+				success = false;
+				break;
+			}
+
+			const GLenum format = ChannelsToFormat(channels);
+			glTexImage2D(
+				kCubemapFaceTargets[i],
+				0,
+				format,
+				width,
+				height,
+				0,
+				format,
+				GL_UNSIGNED_BYTE,
+				pixels);
+			stbi_image_free(pixels);
+		}
+		stbi_set_flip_vertically_on_load(true);
+
+		if (!success) {
+			glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+			glDeleteTextures(1, &cubemap);
+			return false;
+		}
+
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+		if (gHasAnisotropicFiltering) {
+			glTexParameterf(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_ANISOTROPY_EXT, gMaxAnisotropy);
+		}
+		if (pglGenerateMipmap) {
+			pglGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+		}
+		glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+
+		if (gEnvironmentCubemap != 0) {
+			glDeleteTextures(1, &gEnvironmentCubemap);
+		}
+		gEnvironmentCubemap = cubemap;
+		return true;
 	}
 
 	bool LoadMesh(const std::string& path,
@@ -1074,6 +1468,100 @@ void main() {
 		return true;
 	}
 
+	void DestroyBackgroundBuffers() {
+		if (pglDeleteBuffers) {
+			if (gBackgroundEbo != 0) {
+				pglDeleteBuffers(1, &gBackgroundEbo);
+				gBackgroundEbo = 0;
+			}
+			if (gBackgroundVbo != 0) {
+				pglDeleteBuffers(1, &gBackgroundVbo);
+				gBackgroundVbo = 0;
+			}
+		}
+		if (gUseVao && pglDeleteVertexArrays && gBackgroundVao != 0) {
+			pglDeleteVertexArrays(1, &gBackgroundVao);
+			gBackgroundVao = 0;
+		}
+		gBackgroundIndexCount = 0;
+	}
+
+	void CreateBackgroundBuffers(const std::vector<Vertex>& vertices, const std::vector<unsigned int>& indices) {
+		DestroyBackgroundBuffers();
+
+		if (gUseVao) {
+			pglGenVertexArrays(1, &gBackgroundVao);
+			pglBindVertexArray(gBackgroundVao);
+		}
+
+		pglGenBuffers(1, &gBackgroundVbo);
+		pglBindBuffer(GL_ARRAY_BUFFER, gBackgroundVbo);
+		pglBufferData(
+			GL_ARRAY_BUFFER,
+			static_cast<std::ptrdiff_t>(vertices.size() * sizeof(Vertex)),
+			vertices.data(),
+			GL_STATIC_DRAW);
+
+		pglGenBuffers(1, &gBackgroundEbo);
+		pglBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gBackgroundEbo);
+		pglBufferData(
+			GL_ELEMENT_ARRAY_BUFFER,
+			static_cast<std::ptrdiff_t>(indices.size() * sizeof(unsigned int)),
+			indices.data(),
+			GL_STATIC_DRAW);
+
+		pglEnableVertexAttribArray(0);
+		pglVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
+		pglEnableVertexAttribArray(1);
+		pglVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
+		pglEnableVertexAttribArray(2);
+		pglVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, texcoord)));
+
+		if (gUseVao) {
+			pglBindVertexArray(0);
+		}
+		gBackgroundIndexCount = static_cast<int>(indices.size());
+	}
+
+	bool InitializeEnvironmentAssets() {
+		gAssetRoot = ResolveEnvironmentAssetRoot();
+		if (gAssetRoot.empty()) {
+			gEnvironmentLoadStatus = "Environment assets not found (expected cube/ and cubemap/ folders).";
+			return false;
+		}
+
+		const std::filesystem::path cubePath = ResolveCubeObjPath(gAssetRoot);
+		if (cubePath.empty()) {
+			gEnvironmentLoadStatus = "Environment asset root found, but cube.obj is missing.";
+			return false;
+		}
+
+		std::vector<Vertex> backgroundVertices;
+		std::vector<unsigned int> backgroundIndices;
+		std::vector<Submesh> backgroundSubmeshes;
+		std::vector<Material> backgroundMaterials;
+		Bounds backgroundBounds;
+		if (!LoadMesh(
+			cubePath.string(),
+			backgroundVertices,
+			backgroundIndices,
+			backgroundBounds,
+			backgroundSubmeshes,
+			backgroundMaterials)) {
+			gEnvironmentLoadStatus = "Failed to load cube background mesh: " + cubePath.string();
+			return false;
+		}
+		CreateBackgroundBuffers(backgroundVertices, backgroundIndices);
+
+		if (!LoadCubemapTexture(gAssetRoot)) {
+			gEnvironmentLoadStatus = "Failed to load cubemap texture set from: " + (gAssetRoot / "cubemap").string();
+			return false;
+		}
+
+		gEnvironmentLoadStatus = "Loaded environment assets from: " + gAssetRoot.string();
+		return true;
+	}
+
 	GLuint CompileShader(GLenum type, const std::string& source, const char* label) {
 		const char* src = source.c_str();
 		GLuint shader = pglCreateShader(type);
@@ -1161,6 +1649,7 @@ void main() {
 		gModelLocation = pglGetUniformLocation(gProgram, "uModel");
 		gViewLocation = pglGetUniformLocation(gProgram, "uView");
 		gNormalMatrixLocation = pglGetUniformLocation(gProgram, "uNormalMatrix");
+		gWorldNormalMatrixLocation = pglGetUniformLocation(gProgram, "uWorldNormalMatrix");
 		gLightPosLocation = pglGetUniformLocation(gProgram, "uLightPosView");
 		gLightColorLocation = pglGetUniformLocation(gProgram, "uLightColor");
 		gAmbientLocation = pglGetUniformLocation(gProgram, "uAmbientColor");
@@ -1174,6 +1663,22 @@ void main() {
 		gUseDiffuseMapLocation = pglGetUniformLocation(gProgram, "uUseDiffuseMap");
 		gUseSpecularMapLocation = pglGetUniformLocation(gProgram, "uUseSpecularMap");
 		gPlaneColorBiasLocation = pglGetUniformLocation(gProgram, "uPlaneColorBias");
+		gEnvMapLocation = pglGetUniformLocation(gProgram, "uEnvMap");
+		gUseEnvMapLocation = pglGetUniformLocation(gProgram, "uUseEnvMap");
+		gInvViewRotationLocation = pglGetUniformLocation(gProgram, "uInvViewRotation");
+		gEnvReflectionStrengthLocation = pglGetUniformLocation(gProgram, "uEnvReflectionStrength");
+		gPlaneReflectionStrengthLocation = pglGetUniformLocation(gProgram, "uPlaneReflectionStrength");
+		gPlaneEnvStrengthLocation = pglGetUniformLocation(gProgram, "uPlaneEnvStrength");
+		gPlaneReflectionBrightnessLocation = pglGetUniformLocation(gProgram, "uPlaneReflectionBrightness");
+		gReflectionViewProjLocation = pglGetUniformLocation(gProgram, "uReflectionViewProj");
+		gLightDirLocation = pglGetUniformLocation(gProgram, "uLightDirView");
+		gLightViewProjLocation = pglGetUniformLocation(gProgram, "uLightViewProj");
+		gShadowMapLocation = pglGetUniformLocation(gProgram, "uShadowMap");
+		gReceiveShadowsLocation = pglGetUniformLocation(gProgram, "uReceiveShadows");
+		gShadowBiasLocation = pglGetUniformLocation(gProgram, "uShadowBias");
+		gUseSpotLightLocation = pglGetUniformLocation(gProgram, "uUseSpotLight");
+		gSpotCosInnerLocation = pglGetUniformLocation(gProgram, "uSpotCosInner");
+		gSpotCosOuterLocation = pglGetUniformLocation(gProgram, "uSpotCosOuter");
 
 		pglUseProgram(gProgram);
 		if (gDiffuseMapLocation >= 0) {
@@ -1182,7 +1687,39 @@ void main() {
 		if (gSpecularMapLocation >= 0) {
 			pglUniform1i(gSpecularMapLocation, 1);
 		}
+		if (gEnvMapLocation >= 0) {
+			pglUniform1i(gEnvMapLocation, 2);
+		}
+		if (gShadowMapLocation >= 0) {
+			pglUniform1i(gShadowMapLocation, 3);
+		}
 		pglUseProgram(0);
+		return true;
+	}
+
+	bool ReloadDepthShader() {
+		GLuint depthVertex = CompileShader(GL_VERTEX_SHADER, kDepthVertexShader, "depth vertex");
+		if (!depthVertex) {
+			return false;
+		}
+		GLuint depthFragment = CompileShader(GL_FRAGMENT_SHADER, kDepthFragmentShader, "depth fragment");
+		if (!depthFragment) {
+			pglDeleteShader(depthVertex);
+			return false;
+		}
+
+		GLuint newDepthProgram = LinkProgram(depthVertex, depthFragment);
+		pglDeleteShader(depthVertex);
+		pglDeleteShader(depthFragment);
+		if (!newDepthProgram) {
+			return false;
+		}
+
+		if (gDepthProgram != 0) {
+			pglDeleteProgram(gDepthProgram);
+		}
+		gDepthProgram = newDepthProgram;
+		gDepthMvpLocation = pglGetUniformLocation(gDepthProgram, "uDepthMvp");
 		return true;
 	}
 
@@ -1222,10 +1759,10 @@ void main() {
 
 	void CreatePlaneBuffers() {
 		const std::array<Vertex, 4> planeVertices{
-			Vertex{glm::vec3(-1.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f), glm::vec2(0.0f, 0.0f)},
-			Vertex{glm::vec3( 1.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f), glm::vec2(1.0f, 0.0f)},
-			Vertex{glm::vec3( 1.0f,  1.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f), glm::vec2(1.0f, 1.0f)},
-			Vertex{glm::vec3(-1.0f,  1.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f), glm::vec2(0.0f, 1.0f)}
+			Vertex{glm::vec3(-1.0f, 0.0f, -1.0f), glm::vec3(0.0f, 1.0f, 0.0f), glm::vec2(0.0f, 0.0f)},
+			Vertex{glm::vec3( 1.0f, 0.0f, -1.0f), glm::vec3(0.0f, 1.0f, 0.0f), glm::vec2(1.0f, 0.0f)},
+			Vertex{glm::vec3( 1.0f, 0.0f,  1.0f), glm::vec3(0.0f, 1.0f, 0.0f), glm::vec2(1.0f, 1.0f)},
+			Vertex{glm::vec3(-1.0f, 0.0f,  1.0f), glm::vec3(0.0f, 1.0f, 0.0f), glm::vec2(0.0f, 1.0f)}
 		};
 		const std::array<unsigned int, 6> planeIndices{0, 1, 2, 0, 2, 3};
 		gPlaneIndexCount = static_cast<int>(planeIndices.size());
@@ -1263,7 +1800,199 @@ void main() {
 		}
 	}
 
+	void DestroyMeshBuffers(GLMeshBuffers& mesh) {
+		if (pglDeleteBuffers) {
+			if (mesh.ebo != 0) {
+				pglDeleteBuffers(1, &mesh.ebo);
+				mesh.ebo = 0;
+			}
+			if (mesh.vbo != 0) {
+				pglDeleteBuffers(1, &mesh.vbo);
+				mesh.vbo = 0;
+			}
+		}
+		if (gUseVao && pglDeleteVertexArrays && mesh.vao != 0) {
+			pglDeleteVertexArrays(1, &mesh.vao);
+			mesh.vao = 0;
+		}
+		mesh.indexCount = 0;
+	}
+
+	void CreateMeshBuffers(const std::vector<Vertex>& vertices, const std::vector<unsigned int>& indices, GLMeshBuffers& mesh) {
+		DestroyMeshBuffers(mesh);
+		if (vertices.empty() || indices.empty()) {
+			return;
+		}
+
+		if (gUseVao) {
+			pglGenVertexArrays(1, &mesh.vao);
+			pglBindVertexArray(mesh.vao);
+		}
+
+		pglGenBuffers(1, &mesh.vbo);
+		pglBindBuffer(GL_ARRAY_BUFFER, mesh.vbo);
+		pglBufferData(
+			GL_ARRAY_BUFFER,
+			static_cast<std::ptrdiff_t>(vertices.size() * sizeof(Vertex)),
+			vertices.data(),
+			GL_STATIC_DRAW);
+
+		pglGenBuffers(1, &mesh.ebo);
+		pglBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.ebo);
+		pglBufferData(
+			GL_ELEMENT_ARRAY_BUFFER,
+			static_cast<std::ptrdiff_t>(indices.size() * sizeof(unsigned int)),
+			indices.data(),
+			GL_STATIC_DRAW);
+
+		pglEnableVertexAttribArray(0);
+		pglVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
+		pglEnableVertexAttribArray(1);
+		pglVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
+		pglEnableVertexAttribArray(2);
+		pglVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, texcoord)));
+
+		if (gUseVao) {
+			pglBindVertexArray(0);
+		}
+		mesh.indexCount = static_cast<int>(indices.size());
+	}
+
+	void BindMeshBuffers(const GLMeshBuffers& mesh) {
+		if (gUseVao && mesh.vao != 0) {
+			pglBindVertexArray(mesh.vao);
+			return;
+		}
+		pglBindBuffer(GL_ARRAY_BUFFER, mesh.vbo);
+		pglBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.ebo);
+		pglEnableVertexAttribArray(0);
+		pglVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
+		pglEnableVertexAttribArray(1);
+		pglVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
+		pglEnableVertexAttribArray(2);
+		pglVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, texcoord)));
+	}
+
+	void BuildLightCube(std::vector<Vertex>& vertices, std::vector<unsigned int>& indices) {
+		vertices = {
+			{{-0.5f, -0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+			{{ 0.5f, -0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+			{{ 0.5f,  0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}},
+			{{-0.5f,  0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}},
+			{{-0.5f, -0.5f,  0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+			{{ 0.5f, -0.5f,  0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+			{{ 0.5f,  0.5f,  0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}},
+			{{-0.5f,  0.5f,  0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}}
+		};
+		indices = {
+			0, 1, 2, 0, 2, 3,
+			4, 6, 5, 4, 7, 6,
+			4, 5, 1, 4, 1, 0,
+			3, 2, 6, 3, 6, 7,
+			1, 5, 6, 1, 6, 2,
+			4, 0, 3, 4, 3, 7
+		};
+	}
+
+	void BuildLightSphere(std::vector<Vertex>& vertices, std::vector<unsigned int>& indices) {
+		const int latSegments = 14;
+		const int lonSegments = 20;
+		vertices.clear();
+		indices.clear();
+		vertices.reserve(static_cast<size_t>((latSegments + 1) * (lonSegments + 1)));
+		for (int lat = 0; lat <= latSegments; ++lat) {
+			const float v = static_cast<float>(lat) / static_cast<float>(latSegments);
+			const float theta = v * 3.14159265358979323846f;
+			const float y = std::cos(theta);
+			const float r = std::sin(theta);
+			for (int lon = 0; lon <= lonSegments; ++lon) {
+				const float u = static_cast<float>(lon) / static_cast<float>(lonSegments);
+				const float phi = u * (2.0f * 3.14159265358979323846f);
+				const float x = r * std::cos(phi);
+				const float z = r * std::sin(phi);
+				const glm::vec3 normal = glm::normalize(glm::vec3(x, y, z));
+				vertices.push_back(Vertex{normal * 0.5f, normal, glm::vec2(u, v)});
+			}
+		}
+
+		for (int lat = 0; lat < latSegments; ++lat) {
+			for (int lon = 0; lon < lonSegments; ++lon) {
+				const int row0 = lat * (lonSegments + 1);
+				const int row1 = (lat + 1) * (lonSegments + 1);
+				const unsigned int a = static_cast<unsigned int>(row0 + lon);
+				const unsigned int b = static_cast<unsigned int>(row1 + lon);
+				const unsigned int c = static_cast<unsigned int>(row1 + lon + 1);
+				const unsigned int d = static_cast<unsigned int>(row0 + lon + 1);
+				indices.push_back(a);
+				indices.push_back(b);
+				indices.push_back(c);
+				indices.push_back(a);
+				indices.push_back(c);
+				indices.push_back(d);
+			}
+		}
+	}
+
+	bool LoadLightObjectMesh() {
+		DestroyMeshBuffers(gLightObjectMesh);
+		gHasLightObjectMesh = false;
+
+		std::filesystem::path lightPath;
+		if (!gAssetRoot.empty()) {
+			lightPath = ResolveLightObjPath(gAssetRoot);
+		}
+		if (lightPath.empty()) {
+			for (const std::filesystem::path& root : BuildAssetRootCandidates()) {
+				lightPath = ResolveLightObjPath(root);
+				if (!lightPath.empty()) {
+					break;
+				}
+			}
+		}
+		if (lightPath.empty()) {
+			gLightObjectStatus = "Light object not found (expected light/light.obj).";
+			return false;
+		}
+
+		std::vector<Vertex> vertices;
+		std::vector<unsigned int> indices;
+		std::vector<Submesh> submeshes;
+		std::vector<Material> materials;
+		Bounds bounds;
+		if (!LoadMesh(lightPath.string(), vertices, indices, bounds, submeshes, materials)) {
+			gLightObjectStatus = "Failed to load light object: " + lightPath.string();
+			return false;
+		}
+
+		CreateMeshBuffers(vertices, indices, gLightObjectMesh);
+		if (gLightObjectMesh.indexCount <= 0) {
+			gLightObjectStatus = "Light object has no drawable triangles: " + lightPath.string();
+			return false;
+		}
+
+		gHasLightObjectMesh = true;
+		gLightObjectStatus = "Loaded light object: " + lightPath.string();
+		return true;
+	}
+
+	void DestroyLightBuffers() {
+		if (pglDeleteBuffers && gLightVbo != 0) {
+			pglDeleteBuffers(1, &gLightVbo);
+			gLightVbo = 0;
+		}
+		if (gUseVao && pglDeleteVertexArrays && gLightVao != 0) {
+			pglDeleteVertexArrays(1, &gLightVao);
+			gLightVao = 0;
+		}
+		DestroyMeshBuffers(gLightCubeMesh);
+		DestroyMeshBuffers(gLightSphereMesh);
+		DestroyMeshBuffers(gLightObjectMesh);
+		gHasLightObjectMesh = false;
+	}
+
 	void CreateLightBuffers() {
+		DestroyLightBuffers();
+
 		const Vertex lightVertex{
 			glm::vec3(0.0f, 0.0f, 0.0f),
 			glm::vec3(0.0f, 1.0f, 0.0f),
@@ -1288,6 +2017,19 @@ void main() {
 
 		if (gUseVao) {
 			pglBindVertexArray(0);
+		}
+
+		std::vector<Vertex> primitiveVertices;
+		std::vector<unsigned int> primitiveIndices;
+
+		BuildLightCube(primitiveVertices, primitiveIndices);
+		CreateMeshBuffers(primitiveVertices, primitiveIndices, gLightCubeMesh);
+
+		BuildLightSphere(primitiveVertices, primitiveIndices);
+		CreateMeshBuffers(primitiveVertices, primitiveIndices, gLightSphereMesh);
+
+		if (!LoadLightObjectMesh()) {
+			std::fprintf(stderr, "%s\n", gLightObjectStatus.c_str());
 		}
 	}
 
@@ -1363,24 +2105,171 @@ void main() {
 		pglVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, texcoord)));
 	}
 
-	void RenderObjectToCurrentTarget(int viewportWidth, int viewportHeight) {
+	void BindBackgroundBuffers() {
+		if (gUseVao && gBackgroundVao != 0) {
+			pglBindVertexArray(gBackgroundVao);
+			return;
+		}
+		pglBindBuffer(GL_ARRAY_BUFFER, gBackgroundVbo);
+		pglBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gBackgroundEbo);
+		pglEnableVertexAttribArray(0);
+		pglVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
+		pglEnableVertexAttribArray(1);
+		pglVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
+		pglEnableVertexAttribArray(2);
+		pglVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, texcoord)));
+	}
+
+	glm::mat4 BuildPlaneModelMatrix() {
+		glm::mat4 model(1.0f);
+		model = glm::translate(model, glm::vec3(0.0f, gPlaneHeight, 0.0f));
+		const float halfWidth = 0.5f * gPlaneWidth * gPlaneScale;
+		const float halfLength = 0.5f * gPlaneLength * gPlaneScale;
+		model = glm::scale(model, glm::vec3(halfWidth, 1.0f, halfLength));
+		return model;
+	}
+
+	glm::mat4 BuildPlanarReflectionMatrix(float planeHeight) {
+		glm::mat4 reflection(1.0f);
+		reflection = glm::translate(reflection, glm::vec3(0.0f, 2.0f * planeHeight, 0.0f));
+		reflection = glm::scale(reflection, glm::vec3(1.0f, -1.0f, 1.0f));
+		return reflection;
+	}
+
+	glm::mat4 BuildOrientationFromForward(const glm::vec3& forwardDirection) {
+		glm::vec3 forward = forwardDirection;
+		const float forwardLenSq = glm::dot(forward, forward);
+		if (forwardLenSq < 1e-8f) {
+			forward = glm::vec3(0.0f, -1.0f, 0.0f);
+		} else {
+			forward = glm::normalize(forward);
+		}
+
+		glm::vec3 upReference(0.0f, 1.0f, 0.0f);
+		if (std::abs(glm::dot(forward, upReference)) > 0.98f) {
+			upReference = glm::vec3(1.0f, 0.0f, 0.0f);
+		}
+
+		// The light object in light.obj points along local -Z, so local +Z maps to -forward.
+		const glm::vec3 zAxis = -forward;
+		const glm::vec3 xAxis = glm::normalize(glm::cross(upReference, zAxis));
+		const glm::vec3 yAxis = glm::normalize(glm::cross(zAxis, xAxis));
+
+		glm::mat4 orientation(1.0f);
+		orientation[0] = glm::vec4(xAxis, 0.0f);
+		orientation[1] = glm::vec4(yAxis, 0.0f);
+		orientation[2] = glm::vec4(zAxis, 0.0f);
+		return orientation;
+	}
+
+	void DrawModelGeometry() {
+		if (gSubmeshes.empty()) {
+			glDrawElements(GL_TRIANGLES, gIndexCount, GL_UNSIGNED_INT, nullptr);
+			return;
+		}
+		for (const Submesh& submesh : gSubmeshes) {
+			const void* offset = reinterpret_cast<const void*>(static_cast<size_t>(submesh.indexOffset) * sizeof(unsigned int));
+			glDrawElements(GL_TRIANGLES, submesh.indexCount, GL_UNSIGNED_INT, offset);
+		}
+	}
+
+	void UpdateLightShadowState(const glm::mat4& model) {
+		gLightWorldPosition = ComputeLightPosition(model);
+		glm::vec3 lightTarget(0.0f, std::min(0.0f, gPlaneHeight * 0.5f), 0.0f);
+		glm::vec3 lightDirection = lightTarget - gLightWorldPosition;
+		const float directionLengthSq = glm::dot(lightDirection, lightDirection);
+		if (directionLengthSq < 1e-6f) {
+			lightDirection = glm::vec3(0.0f, -1.0f, 0.0f);
+		}
+		gLightWorldDirection = glm::normalize(lightDirection);
+
+		glm::vec3 upAxis(0.0f, 1.0f, 0.0f);
+		if (std::abs(gLightWorldDirection.y) > 0.98f) {
+			upAxis = glm::vec3(0.0f, 0.0f, 1.0f);
+		}
+		const glm::mat4 lightView = glm::lookAt(gLightWorldPosition, lightTarget, upAxis);
+		const float objectScaleMax = std::max(gObjectScale.x, std::max(gObjectScale.y, gObjectScale.z));
+		const float planeHalfWidth = 0.5f * gPlaneWidth * gPlaneScale;
+		const float planeHalfLength = 0.5f * gPlaneLength * gPlaneScale;
+
+		const float sceneRadius =
+			std::max(
+				std::max(gBounds.MaxExtent(), 1.0f) * objectScaleMax * 1.6f,
+				std::max(planeHalfWidth, planeHalfLength) * 1.3f) +
+			std::abs(gPlaneHeight) +
+			1.0f;
+		const float distanceToTarget = glm::length(gLightWorldPosition - lightTarget);
+		const float nearPlane = 0.1f;
+		const float farPlane = std::max(nearPlane + 1.0f, distanceToTarget + sceneRadius);
+		const float clampedInner = std::clamp(gSpotInnerDeg, 1.0f, 69.0f);
+		const float clampedOuter = std::clamp(gSpotOuterDeg, clampedInner + 1.0f, 70.0f);
+		const float fov = std::clamp(clampedOuter * 2.0f + 6.0f, 20.0f, 150.0f);
+		const glm::mat4 lightProjection = glm::perspective(glm::radians(fov), 1.0f, nearPlane, farPlane);
+		gLightViewProjection = lightProjection * lightView;
+	}
+
+	void RenderShadowDepthPass(const glm::mat4& model) {
+		if (gDepthProgram == 0 || gShadowMap.framebuffer == 0 || gVbo == 0 || gEbo == 0) {
+			return;
+		}
+
+		pglBindFramebuffer(GL_FRAMEBUFFER, gShadowMap.framebuffer);
+		glViewport(0, 0, gShadowMap.width, gShadowMap.height);
+		glClear(GL_DEPTH_BUFFER_BIT);
+		glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+		glEnable(GL_POLYGON_OFFSET_FILL);
+		glPolygonOffset(2.0f, 4.0f);
+
+		pglUseProgram(gDepthProgram);
+		const glm::mat4 objectModel = model * glm::scale(glm::mat4(1.0f), gObjectScale);
+		const glm::mat4 depthMvp = gLightViewProjection * objectModel;
+		if (gDepthMvpLocation >= 0) {
+			pglUniformMatrix4fv(gDepthMvpLocation, 1, GL_FALSE, glm::value_ptr(depthMvp));
+		}
+		BindModelBuffers();
+		DrawModelGeometry();
+
+		if (gUseVao && gVao != 0) {
+			pglBindVertexArray(0);
+		}
+		pglUseProgram(0);
+		glDisable(GL_POLYGON_OFFSET_FILL);
+		glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+		pglBindFramebuffer(GL_FRAMEBUFFER, 0);
+	}
+
+	void RenderObjectToCurrentTarget(
+		const glm::mat4& model,
+		const glm::mat4& view,
+		const glm::mat4& projection,
+		bool drawLightMarker,
+		bool forceBlinn,
+		bool enableEnvReflection,
+		float envReflectionStrength,
+		const glm::mat4* lightViewOverride) {
 		if (gProgram == 0 || gVbo == 0 || gEbo == 0) {
 			return;
 		}
 
 		pglUseProgram(gProgram);
 
-		const glm::mat4 model = BuildObjectModelMatrix(gObjectCamera);
-		const glm::mat4 view = BuildViewMatrix(gObjectCamera);
-		const glm::mat4 projection = BuildProjectionMatrix(viewportWidth, viewportHeight, gNearPlane, gFarPlane);
-		const glm::mat4 mvp = projection * view * model;
-		const glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(view * model)));
+		const glm::mat4 objectModel = model * glm::scale(glm::mat4(1.0f), gObjectScale);
+		const glm::mat4 mvp = projection * view * objectModel;
+		glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(view * objectModel)));
+		glm::mat3 worldNormalMatrix = glm::transpose(glm::inverse(glm::mat3(objectModel)));
+		const glm::mat3 invViewRotation = glm::transpose(glm::mat3(view));
+		const glm::mat4 identity(1.0f);
+		const float handedness = glm::determinant(glm::mat3(view * objectModel));
+		if (handedness < 0.0f) {
+			normalMatrix = -normalMatrix;
+			worldNormalMatrix = -worldNormalMatrix;
+		}
 
 		if (gMvpLocation >= 0) {
 			pglUniformMatrix4fv(gMvpLocation, 1, GL_FALSE, glm::value_ptr(mvp));
 		}
 		if (gModelLocation >= 0) {
-			pglUniformMatrix4fv(gModelLocation, 1, GL_FALSE, glm::value_ptr(model));
+			pglUniformMatrix4fv(gModelLocation, 1, GL_FALSE, glm::value_ptr(objectModel));
 		}
 		if (gViewLocation >= 0) {
 			pglUniformMatrix4fv(gViewLocation, 1, GL_FALSE, glm::value_ptr(view));
@@ -1388,24 +2277,83 @@ void main() {
 		if (gNormalMatrixLocation >= 0) {
 			pglUniformMatrix3fv(gNormalMatrixLocation, 1, GL_FALSE, glm::value_ptr(normalMatrix));
 		}
-
-		const glm::vec3 lightPosWorld = ComputeLightPosition(model);
-		const glm::vec3 lightPosView = glm::vec3(view * glm::vec4(lightPosWorld, 1.0f));
-		const glm::vec3 lightColor = gLightColor * gLightIntensity;
-		if (gLightPosLocation >= 0) {
-			pglUniform3fv(gLightPosLocation, 1, glm::value_ptr(lightPosView));
+		if (gWorldNormalMatrixLocation >= 0) {
+			pglUniformMatrix3fv(gWorldNormalMatrixLocation, 1, GL_FALSE, glm::value_ptr(worldNormalMatrix));
 		}
-		if (gLightColorLocation >= 0) {
-			pglUniform3fv(gLightColorLocation, 1, glm::value_ptr(lightColor));
+		if (gInvViewRotationLocation >= 0) {
+			pglUniformMatrix3fv(gInvViewRotationLocation, 1, GL_FALSE, glm::value_ptr(invViewRotation));
 		}
-		if (gShadeModeLocation >= 0) {
-			pglUniform1i(gShadeModeLocation, gShowNormals ? 1 : 0);
+		if (gReflectionViewProjLocation >= 0) {
+			pglUniformMatrix4fv(gReflectionViewProjLocation, 1, GL_FALSE, glm::value_ptr(identity));
+		}
+		if (gUseEnvMapLocation >= 0) {
+			pglUniform1i(gUseEnvMapLocation, (enableEnvReflection && gEnvironmentCubemap != 0) ? 1 : 0);
+		}
+		if (gEnvReflectionStrengthLocation >= 0) {
+			pglUniform1f(gEnvReflectionStrengthLocation, enableEnvReflection ? envReflectionStrength : 0.0f);
+		}
+		if (gPlaneReflectionStrengthLocation >= 0) {
+			pglUniform1f(gPlaneReflectionStrengthLocation, 0.0f);
+		}
+		if (gPlaneEnvStrengthLocation >= 0) {
+			pglUniform1f(gPlaneEnvStrengthLocation, 0.0f);
+		}
+		if (gPlaneReflectionBrightnessLocation >= 0) {
+			pglUniform1f(gPlaneReflectionBrightnessLocation, 1.0f);
 		}
 		if (gPlaneColorBiasLocation >= 0) {
 			const glm::vec3 zeroBias(0.0f);
 			pglUniform3fv(gPlaneColorBiasLocation, 1, glm::value_ptr(zeroBias));
 		}
 
+		const glm::mat4& lightView = (lightViewOverride != nullptr) ? *lightViewOverride : view;
+		const glm::vec3 lightPosWorld = gLightWorldPosition;
+		const glm::vec3 lightPosView = glm::vec3(lightView * glm::vec4(lightPosWorld, 1.0f));
+		const glm::vec3 lightDirView = glm::normalize(glm::mat3(lightView) * gLightWorldDirection);
+		const glm::vec3 lightColor = gLightColor * gLightIntensity;
+		if (gLightPosLocation >= 0) {
+			pglUniform3fv(gLightPosLocation, 1, glm::value_ptr(lightPosView));
+		}
+		if (gLightDirLocation >= 0) {
+			pglUniform3fv(gLightDirLocation, 1, glm::value_ptr(lightDirView));
+		}
+		if (gLightColorLocation >= 0) {
+			pglUniform3fv(gLightColorLocation, 1, glm::value_ptr(lightColor));
+		}
+		if (gLightViewProjLocation >= 0) {
+			pglUniformMatrix4fv(gLightViewProjLocation, 1, GL_FALSE, glm::value_ptr(gLightViewProjection));
+		}
+		if (gReceiveShadowsLocation >= 0) {
+			pglUniform1i(gReceiveShadowsLocation, gShadowMap.depthTexture != 0 ? 1 : 0);
+		}
+		if (gShadowBiasLocation >= 0) {
+			pglUniform1f(gShadowBiasLocation, gShadowBias);
+		}
+		if (gUseSpotLightLocation >= 0) {
+			pglUniform1i(gUseSpotLightLocation, 1);
+		}
+		const float clampedInner = std::clamp(gSpotInnerDeg, 1.0f, 89.0f);
+		const float clampedOuter = std::clamp(gSpotOuterDeg, clampedInner + 1.0f, 89.9f);
+		const float spotInnerCos = std::cos(glm::radians(clampedInner));
+		const float spotOuterCos = std::cos(glm::radians(clampedOuter));
+		if (gSpotCosInnerLocation >= 0) {
+			pglUniform1f(gSpotCosInnerLocation, spotInnerCos);
+		}
+		if (gSpotCosOuterLocation >= 0) {
+			pglUniform1f(gSpotCosOuterLocation, spotOuterCos);
+		}
+		if (gShadeModeLocation >= 0) {
+			pglUniform1i(gShadeModeLocation, (!forceBlinn && gShowNormals) ? 1 : 0);
+		}
+
+		if (pglActiveTexture) {
+			pglActiveTexture(GL_TEXTURE3);
+		}
+		glBindTexture(GL_TEXTURE_2D, gShadowMap.depthTexture);
+		if (pglActiveTexture) {
+			pglActiveTexture(GL_TEXTURE2);
+		}
+		glBindTexture(GL_TEXTURE_CUBE_MAP, enableEnvReflection ? gEnvironmentCubemap : 0);
 		BindModelBuffers();
 
 		auto applyMaterial = [&](const Material& material) {
@@ -1457,11 +2405,41 @@ void main() {
 			}
 		}
 
-		if (gLightVbo != 0) {
-			const glm::mat4 modelLight = glm::translate(glm::mat4(1.0f), lightPosWorld);
+		if (drawLightMarker && gShowLightMarker && gLightVbo != 0) {
+			const LightMarkerShape selectedShape = static_cast<LightMarkerShape>(
+				std::clamp(gLightMarkerShape, 0, static_cast<int>(LightMarkerShape::LightObject)));
+
+			const GLMeshBuffers* selectedMesh = nullptr;
+			switch (selectedShape) {
+			case LightMarkerShape::Cube:
+				selectedMesh = &gLightCubeMesh;
+				break;
+			case LightMarkerShape::Sphere:
+				selectedMesh = &gLightSphereMesh;
+				break;
+			case LightMarkerShape::LightObject:
+				selectedMesh = gHasLightObjectMesh ? &gLightObjectMesh : &gLightSphereMesh;
+				break;
+			case LightMarkerShape::Point:
+			default:
+				selectedMesh = nullptr;
+				break;
+			}
+
+			glm::mat4 modelLight = glm::translate(glm::mat4(1.0f), lightPosWorld);
+			if (selectedShape == LightMarkerShape::LightObject) {
+				modelLight = modelLight * BuildOrientationFromForward(gLightWorldDirection);
+			}
+			if (selectedMesh != nullptr && selectedMesh->indexCount > 0) {
+				const float markerScale = std::max(
+					kLightMarkerMeshScaleMin,
+					gBounds.MaxExtent() * kLightMarkerMeshScaleRatio * gLightMarkerScale);
+				modelLight = modelLight * glm::scale(glm::mat4(1.0f), glm::vec3(markerScale));
+			}
+
 			const glm::mat4 mvpLight = projection * view * modelLight;
 			const glm::mat3 normalMatrixLight = glm::transpose(glm::inverse(glm::mat3(view * modelLight)));
-
+			const glm::mat3 worldNormalMatrixLight = glm::transpose(glm::inverse(glm::mat3(modelLight)));
 			if (gMvpLocation >= 0) {
 				pglUniformMatrix4fv(gMvpLocation, 1, GL_FALSE, glm::value_ptr(mvpLight));
 			}
@@ -1471,35 +2449,51 @@ void main() {
 			if (gNormalMatrixLocation >= 0) {
 				pglUniformMatrix3fv(gNormalMatrixLocation, 1, GL_FALSE, glm::value_ptr(normalMatrixLight));
 			}
+			if (gWorldNormalMatrixLocation >= 0) {
+				pglUniformMatrix3fv(gWorldNormalMatrixLocation, 1, GL_FALSE, glm::value_ptr(worldNormalMatrixLight));
+			}
 			if (gShadeModeLocation >= 0) {
 				pglUniform1i(gShadeModeLocation, 2);
 			}
 			if (gMarkerColorLocation >= 0) {
-				const glm::vec3 markerColor(1.0f, 0.9f, 0.1f);
-				pglUniform3fv(gMarkerColorLocation, 1, glm::value_ptr(markerColor));
+				pglUniform3fv(gMarkerColorLocation, 1, glm::value_ptr(gLightMarkerColor));
 			}
 
-			glPointSize(kLightMarkerPointSize);
-			if (gUseVao && gLightVao != 0) {
-				pglBindVertexArray(gLightVao);
+			if (selectedMesh != nullptr && selectedMesh->indexCount > 0) {
+				BindMeshBuffers(*selectedMesh);
+				glDrawElements(GL_TRIANGLES, selectedMesh->indexCount, GL_UNSIGNED_INT, nullptr);
+				if (gUseVao && selectedMesh->vao != 0) {
+					pglBindVertexArray(0);
+				}
 			} else {
-				pglBindBuffer(GL_ARRAY_BUFFER, gLightVbo);
-				pglEnableVertexAttribArray(0);
-				pglVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
-				pglEnableVertexAttribArray(1);
-				pglVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
-				pglEnableVertexAttribArray(2);
-				pglVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, texcoord)));
+				glPointSize(kLightMarkerPointSize * std::max(0.1f, gLightMarkerScale));
+				if (gUseVao && gLightVao != 0) {
+					pglBindVertexArray(gLightVao);
+				} else {
+					pglBindBuffer(GL_ARRAY_BUFFER, gLightVbo);
+					pglEnableVertexAttribArray(0);
+					pglVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, position)));
+					pglEnableVertexAttribArray(1);
+					pglVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, normal)));
+					pglEnableVertexAttribArray(2);
+					pglVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, texcoord)));
+				}
+				glDrawArrays(GL_POINTS, 0, 1);
+				if (gUseVao && gLightVao != 0) {
+					pglBindVertexArray(0);
+				}
+				glPointSize(1.0f);
 			}
-
-			glDrawArrays(GL_POINTS, 0, 1);
-
-			if (gUseVao && gLightVao != 0) {
-				pglBindVertexArray(0);
-			}
-			glPointSize(1.0f);
 		}
 
+		if (pglActiveTexture) {
+			pglActiveTexture(GL_TEXTURE3);
+		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+		if (pglActiveTexture) {
+			pglActiveTexture(GL_TEXTURE2);
+		}
+		glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
 		if (pglActiveTexture) {
 			pglActiveTexture(GL_TEXTURE1);
 		}
@@ -1515,18 +2509,133 @@ void main() {
 		pglUseProgram(0);
 	}
 
-	void RenderPlaneToCurrentTarget() {
-		if (gProgram == 0 || gPlaneVbo == 0 || gPlaneEbo == 0 || gRenderTexture.colorTexture == 0) {
+	void RenderBackgroundToCurrentTarget(const glm::mat4& view, const glm::mat4& projection) {
+		if (gProgram == 0 || gBackgroundVbo == 0 || gBackgroundEbo == 0 || gBackgroundIndexCount <= 0 || gEnvironmentCubemap == 0) {
 			return;
 		}
 
 		pglUseProgram(gProgram);
 
-		const glm::mat4 model(1.0f);
-		const glm::mat4 view = BuildViewMatrix(gPlaneCamera);
-		const glm::mat4 projection = BuildProjectionMatrix(gWindowWidth, gWindowHeight, kNearPlane, 100.0f);
+		const glm::mat4 model = glm::scale(glm::mat4(1.0f), glm::vec3(kSkyboxDepth));
+		const glm::mat4 skyboxView = glm::mat4(glm::mat3(view));
+		const glm::mat4 mvp = projection * skyboxView * model;
+		const glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(skyboxView * model)));
+		const glm::mat3 worldNormalMatrix = glm::transpose(glm::inverse(glm::mat3(model)));
+		const glm::mat3 invViewRotation = glm::transpose(glm::mat3(view));
+		const glm::mat4 identity(1.0f);
+
+		if (gMvpLocation >= 0) {
+			pglUniformMatrix4fv(gMvpLocation, 1, GL_FALSE, glm::value_ptr(mvp));
+		}
+		if (gModelLocation >= 0) {
+			pglUniformMatrix4fv(gModelLocation, 1, GL_FALSE, glm::value_ptr(model));
+		}
+		if (gViewLocation >= 0) {
+			pglUniformMatrix4fv(gViewLocation, 1, GL_FALSE, glm::value_ptr(skyboxView));
+		}
+		if (gNormalMatrixLocation >= 0) {
+			pglUniformMatrix3fv(gNormalMatrixLocation, 1, GL_FALSE, glm::value_ptr(normalMatrix));
+		}
+		if (gWorldNormalMatrixLocation >= 0) {
+			pglUniformMatrix3fv(gWorldNormalMatrixLocation, 1, GL_FALSE, glm::value_ptr(worldNormalMatrix));
+		}
+		if (gInvViewRotationLocation >= 0) {
+			pglUniformMatrix3fv(gInvViewRotationLocation, 1, GL_FALSE, glm::value_ptr(invViewRotation));
+		}
+		if (gReflectionViewProjLocation >= 0) {
+			pglUniformMatrix4fv(gReflectionViewProjLocation, 1, GL_FALSE, glm::value_ptr(identity));
+		}
+		if (gLightViewProjLocation >= 0) {
+			pglUniformMatrix4fv(gLightViewProjLocation, 1, GL_FALSE, glm::value_ptr(identity));
+		}
+		if (gReceiveShadowsLocation >= 0) {
+			pglUniform1i(gReceiveShadowsLocation, 0);
+		}
+		if (gUseSpotLightLocation >= 0) {
+			pglUniform1i(gUseSpotLightLocation, 0);
+		}
+		if (gShadeModeLocation >= 0) {
+			pglUniform1i(gShadeModeLocation, 4);
+		}
+		if (gUseEnvMapLocation >= 0) {
+			pglUniform1i(gUseEnvMapLocation, 1);
+		}
+		if (gUseDiffuseMapLocation >= 0) {
+			pglUniform1i(gUseDiffuseMapLocation, 0);
+		}
+		if (gUseSpecularMapLocation >= 0) {
+			pglUniform1i(gUseSpecularMapLocation, 0);
+		}
+		if (gPlaneColorBiasLocation >= 0) {
+			const glm::vec3 zeroBias(0.0f);
+			pglUniform3fv(gPlaneColorBiasLocation, 1, glm::value_ptr(zeroBias));
+		}
+
+		if (pglActiveTexture) {
+			pglActiveTexture(GL_TEXTURE3);
+		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+		if (pglActiveTexture) {
+			pglActiveTexture(GL_TEXTURE0);
+		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+		if (pglActiveTexture) {
+			pglActiveTexture(GL_TEXTURE1);
+		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+		if (pglActiveTexture) {
+			pglActiveTexture(GL_TEXTURE2);
+		}
+		glBindTexture(GL_TEXTURE_CUBE_MAP, gEnvironmentCubemap);
+
+		glDepthMask(GL_FALSE);
+		glDepthFunc(GL_LEQUAL);
+		BindBackgroundBuffers();
+		glDrawElements(GL_TRIANGLES, gBackgroundIndexCount, GL_UNSIGNED_INT, nullptr);
+		glDepthFunc(GL_LESS);
+		glDepthMask(GL_TRUE);
+
+		if (gUseVao && gBackgroundVao != 0) {
+			pglBindVertexArray(0);
+		}
+		if (pglActiveTexture) {
+			pglActiveTexture(GL_TEXTURE3);
+		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+		if (pglActiveTexture) {
+			pglActiveTexture(GL_TEXTURE2);
+		}
+		glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+		if (pglActiveTexture) {
+			pglActiveTexture(GL_TEXTURE1);
+		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+		if (pglActiveTexture) {
+			pglActiveTexture(GL_TEXTURE0);
+		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+		pglUseProgram(0);
+	}
+
+	void RenderPlaneToCurrentTarget(
+		const glm::mat4& view,
+		const glm::mat4& projection,
+		const glm::mat4& reflectionViewProj) {
+		if (gProgram == 0 || gPlaneVbo == 0 || gPlaneEbo == 0) {
+			return;
+		}
+
+		pglUseProgram(gProgram);
+
+		const glm::mat4 model = BuildPlaneModelMatrix();
 		const glm::mat4 mvp = projection * view * model;
 		const glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(view * model)));
+		const glm::mat3 worldNormalMatrix = glm::transpose(glm::inverse(glm::mat3(model)));
+		const glm::mat3 invViewRotation = glm::transpose(glm::mat3(view));
+		const glm::vec3 lightPosView = glm::vec3(view * glm::vec4(gLightWorldPosition, 1.0f));
+		const glm::vec3 lightDirView = glm::normalize(glm::mat3(view) * gLightWorldDirection);
+		const glm::vec3 lightColor = gLightColor * gLightIntensity;
+		const bool useReflectionTexture = gRenderToPlane && gRenderTexture.colorTexture != 0;
 
 		if (gMvpLocation >= 0) {
 			pglUniformMatrix4fv(gMvpLocation, 1, GL_FALSE, glm::value_ptr(mvp));
@@ -1540,44 +2649,102 @@ void main() {
 		if (gNormalMatrixLocation >= 0) {
 			pglUniformMatrix3fv(gNormalMatrixLocation, 1, GL_FALSE, glm::value_ptr(normalMatrix));
 		}
+		if (gWorldNormalMatrixLocation >= 0) {
+			pglUniformMatrix3fv(gWorldNormalMatrixLocation, 1, GL_FALSE, glm::value_ptr(worldNormalMatrix));
+		}
+		if (gInvViewRotationLocation >= 0) {
+			pglUniformMatrix3fv(gInvViewRotationLocation, 1, GL_FALSE, glm::value_ptr(invViewRotation));
+		}
+		if (gReflectionViewProjLocation >= 0) {
+			pglUniformMatrix4fv(gReflectionViewProjLocation, 1, GL_FALSE, glm::value_ptr(reflectionViewProj));
+		}
+		if (gLightPosLocation >= 0) {
+			pglUniform3fv(gLightPosLocation, 1, glm::value_ptr(lightPosView));
+		}
+		if (gLightDirLocation >= 0) {
+			pglUniform3fv(gLightDirLocation, 1, glm::value_ptr(lightDirView));
+		}
+		if (gLightColorLocation >= 0) {
+			pglUniform3fv(gLightColorLocation, 1, glm::value_ptr(lightColor));
+		}
+		if (gLightViewProjLocation >= 0) {
+			pglUniformMatrix4fv(gLightViewProjLocation, 1, GL_FALSE, glm::value_ptr(gLightViewProjection));
+		}
+		if (gReceiveShadowsLocation >= 0) {
+			pglUniform1i(gReceiveShadowsLocation, gShadowMap.depthTexture != 0 ? 1 : 0);
+		}
+		if (gShadowBiasLocation >= 0) {
+			pglUniform1f(gShadowBiasLocation, gShadowBias);
+		}
+		if (gUseSpotLightLocation >= 0) {
+			pglUniform1i(gUseSpotLightLocation, 1);
+		}
+		const float clampedInner = std::clamp(gSpotInnerDeg, 1.0f, 89.0f);
+		const float clampedOuter = std::clamp(gSpotOuterDeg, clampedInner + 1.0f, 89.9f);
+		const float spotInnerCos = std::cos(glm::radians(clampedInner));
+		const float spotOuterCos = std::cos(glm::radians(clampedOuter));
+		if (gSpotCosInnerLocation >= 0) {
+			pglUniform1f(gSpotCosInnerLocation, spotInnerCos);
+		}
+		if (gSpotCosOuterLocation >= 0) {
+			pglUniform1f(gSpotCosOuterLocation, spotOuterCos);
+		}
 		if (gShadeModeLocation >= 0) {
 			pglUniform1i(gShadeModeLocation, 3);
 		}
-		if (gPlaneColorBiasLocation >= 0) {
-			const glm::vec3 planeColorBias(kPlaneColorBias);
-			pglUniform3fv(gPlaneColorBiasLocation, 1, glm::value_ptr(planeColorBias));
-		}
 		if (gUseDiffuseMapLocation >= 0) {
-			pglUniform1i(gUseDiffuseMapLocation, 1);
+			pglUniform1i(gUseDiffuseMapLocation, useReflectionTexture ? 1 : 0);
 		}
 		if (gUseSpecularMapLocation >= 0) {
 			pglUniform1i(gUseSpecularMapLocation, 0);
 		}
-		if (gLightColorLocation >= 0) {
-			const glm::vec3 lightColor(1.0f, 1.0f, 1.0f);
-			pglUniform3fv(gLightColorLocation, 1, glm::value_ptr(lightColor));
+		if (gUseEnvMapLocation >= 0) {
+			pglUniform1i(gUseEnvMapLocation, gEnvironmentCubemap != 0 ? 1 : 0);
 		}
 		if (gAmbientLocation >= 0) {
-			const glm::vec3 zero(0.0f);
-			pglUniform3fv(gAmbientLocation, 1, glm::value_ptr(zero));
+			pglUniform3fv(gAmbientLocation, 1, glm::value_ptr(gPlaneAmbientColor));
 		}
 		if (gDiffuseLocation >= 0) {
-			const glm::vec3 one(1.0f);
-			pglUniform3fv(gDiffuseLocation, 1, glm::value_ptr(one));
+			pglUniform3fv(gDiffuseLocation, 1, glm::value_ptr(gPlaneDiffuseColor));
 		}
 		if (gSpecularLocation >= 0) {
-			const glm::vec3 zero(0.0f);
-			pglUniform3fv(gSpecularLocation, 1, glm::value_ptr(zero));
+			pglUniform3fv(gSpecularLocation, 1, glm::value_ptr(gPlaneSpecularColor));
+		}
+		if (gShininessLocation >= 0) {
+			pglUniform1f(gShininessLocation, gPlaneShininess);
+		}
+		if (gPlaneColorBiasLocation >= 0) {
+			pglUniform3fv(gPlaneColorBiasLocation, 1, glm::value_ptr(gPlaneColorBias));
+		}
+		if (gEnvReflectionStrengthLocation >= 0) {
+			pglUniform1f(gEnvReflectionStrengthLocation, 0.0f);
+		}
+		if (gPlaneReflectionStrengthLocation >= 0) {
+			pglUniform1f(gPlaneReflectionStrengthLocation, gPlaneRttReflectionStrength);
+		}
+		if (gPlaneEnvStrengthLocation >= 0) {
+			pglUniform1f(gPlaneEnvStrengthLocation, gPlaneEnvReflectionStrength);
+		}
+		if (gPlaneReflectionBrightnessLocation >= 0) {
+			pglUniform1f(gPlaneReflectionBrightnessLocation, gPlaneRttReflectionBrightness);
 		}
 
 		if (pglActiveTexture) {
 			pglActiveTexture(GL_TEXTURE0);
 		}
-		glBindTexture(GL_TEXTURE_2D, gRenderTexture.colorTexture);
+		glBindTexture(GL_TEXTURE_2D, useReflectionTexture ? gRenderTexture.colorTexture : 0);
 		if (pglActiveTexture) {
 			pglActiveTexture(GL_TEXTURE1);
 		}
 		glBindTexture(GL_TEXTURE_2D, 0);
+		if (pglActiveTexture) {
+			pglActiveTexture(GL_TEXTURE2);
+		}
+		glBindTexture(GL_TEXTURE_CUBE_MAP, gEnvironmentCubemap);
+		if (pglActiveTexture) {
+			pglActiveTexture(GL_TEXTURE3);
+		}
+		glBindTexture(GL_TEXTURE_2D, gShadowMap.depthTexture);
 
 		BindPlaneBuffers();
 		glDrawElements(GL_TRIANGLES, gPlaneIndexCount, GL_UNSIGNED_INT, nullptr);
@@ -1585,6 +2752,14 @@ void main() {
 		if (gUseVao && gPlaneVao != 0) {
 			pglBindVertexArray(0);
 		}
+		if (pglActiveTexture) {
+			pglActiveTexture(GL_TEXTURE3);
+		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+		if (pglActiveTexture) {
+			pglActiveTexture(GL_TEXTURE2);
+		}
+		glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
 		if (pglActiveTexture) {
 			pglActiveTexture(GL_TEXTURE1);
 		}
@@ -1601,7 +2776,7 @@ void main() {
 			return;
 		}
 		const char* mode = gUsePerspective ? "Perspective" : "Orthographic";
-		const char* shade = gShowNormals ? "Normals" : "Blinn";
+		const char* shade = gShowNormals ? "Normals" : "Blinn+Env";
 		char title[160];
 		std::snprintf(title, sizeof(title), "%s | %s | %s", gpurenderer::config::kWindowTitleBase, mode, shade);
 		glfwSetWindowTitle(gWindow, title);
@@ -1612,44 +2787,62 @@ void main() {
 			return;
 		}
 
-		if (gRenderToPlane) {
-			if (gPlaneVbo == 0 || gPlaneEbo == 0) {
-				return;
+		const glm::mat4 model = BuildObjectModelMatrix(gObjectCamera);
+		const glm::mat4 view = BuildViewMatrix(gObjectCamera);
+		const glm::mat4 projection = BuildProjectionMatrix(gWindowWidth, gWindowHeight, gNearPlane, gFarPlane);
+		const glm::mat4 reflectionView = view * BuildPlanarReflectionMatrix(gPlaneHeight);
+		const glm::mat4 reflectionViewProj = projection * reflectionView;
+		UpdateLightShadowState(model);
+		if (CreateOrResizeShadowMap(kShadowMapResolution, kShadowMapResolution)) {
+			RenderShadowDepthPass(model);
+		}
+
+		if (gRenderToPlane && gPlaneVbo != 0 && gPlaneEbo != 0) {
+			if (CreateOrResizeRenderTexture(gWindowWidth, gWindowHeight)) {
+				pglBindFramebuffer(GL_FRAMEBUFFER, gRenderTexture.framebuffer);
+				glViewport(0, 0, gRenderTexture.width, gRenderTexture.height);
+				glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+				glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+				RenderObjectToCurrentTarget(
+					model,
+					reflectionView,
+					projection,
+					false,
+					true,
+					true,
+					kObjectEnvReflectionStrength,
+					&view);
+				pglBindFramebuffer(GL_FRAMEBUFFER, 0);
+				GenerateRenderTextureMipmaps();
 			}
-			const int offscreenSize = ComputeSquareOffscreenSize(gWindowWidth, gWindowHeight);
-			if (!CreateOrResizeRenderTexture(offscreenSize, offscreenSize)) {
-				return;
-			}
-
-			pglBindFramebuffer(GL_FRAMEBUFFER, gRenderTexture.framebuffer);
-			glViewport(0, 0, gRenderTexture.width, gRenderTexture.height);
-			glClearColor(gOffscreenBackgroundColor.x, gOffscreenBackgroundColor.y, gOffscreenBackgroundColor.z, 1.0f);
-			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-			RenderObjectToCurrentTarget(gRenderTexture.width, gRenderTexture.height);
-
-			pglBindFramebuffer(GL_FRAMEBUFFER, 0);
-			GenerateRenderTextureMipmaps();
-
-			glViewport(0, 0, gWindowWidth, gWindowHeight);
-			glClearColor(gSceneBackgroundColor.x, gSceneBackgroundColor.y, gSceneBackgroundColor.z, 1.0f);
-			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-			RenderPlaneToCurrentTarget();
-			return;
 		}
 
 		pglBindFramebuffer(GL_FRAMEBUFFER, 0);
 		glViewport(0, 0, gWindowWidth, gWindowHeight);
 		glClearColor(gSceneBackgroundColor.x, gSceneBackgroundColor.y, gSceneBackgroundColor.z, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-		RenderObjectToCurrentTarget(gWindowWidth, gWindowHeight);
+
+		RenderBackgroundToCurrentTarget(view, projection);
+		if (gPlaneVbo != 0 && gPlaneEbo != 0) {
+			RenderPlaneToCurrentTarget(view, projection, reflectionViewProj);
+		}
+		RenderObjectToCurrentTarget(
+			model,
+			view,
+			projection,
+			true,
+			false,
+			true,
+			kObjectEnvReflectionStrength,
+			nullptr);
 	}
 
 	void Reshape(GLFWwindow*, int width, int height) {
 		gWindowWidth = width > 0 ? width : 1;
 		gWindowHeight = height > 0 ? height : 1;
 		glViewport(0, 0, gWindowWidth, gWindowHeight);
-		const int offscreenSize = ComputeSquareOffscreenSize(gWindowWidth, gWindowHeight);
-		CreateOrResizeRenderTexture(offscreenSize, offscreenSize);
+		CreateOrResizeRenderTexture(gWindowWidth, gWindowHeight);
+		CreateOrResizeShadowMap(kShadowMapResolution, kShadowMapResolution);
 	}
 
 	bool IsCtrlDown(GLFWwindow* window) {
@@ -1663,11 +2856,6 @@ void main() {
 
 	bool IsGuiCapturingKeyboard() {
 		return gGuiInitialized && ImGui::GetCurrentContext() != nullptr && ImGui::GetIO().WantCaptureKeyboard;
-	}
-
-	bool IsAltDown(GLFWwindow* window) {
-		return glfwGetKey(window, GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
-			glfwGetKey(window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS;
 	}
 
 	void MouseButton(GLFWwindow* window, int button, int action, int mods) {
@@ -1702,14 +2890,14 @@ void main() {
 
 		const float dx = static_cast<float>(x - gLastMouseX);
 		const float dy = static_cast<float>(y - gLastMouseY);
-		OrbitCamera& targetCamera = IsAltDown(window) ? gPlaneCamera : gObjectCamera;
+		OrbitCamera& targetCamera = gObjectCamera;
 		const float viewHeight = gUsePerspective
 			? (2.0f * targetCamera.distance * std::tan(0.5f * DegreesToRadians(kDefaultFovDeg)))
 			: 2.0f;
 		const float panScale = (gWindowHeight > 0) ? (viewHeight / static_cast<float>(gWindowHeight)) : 0.0f;
 
 		if (gLeftDown) {
-			if (!IsAltDown(window) && IsCtrlDown(window)) {
+			if (IsCtrlDown(window)) {
 				gLightYawDeg += dx * kLightRotationSpeedDegPerPixel;
 				gLightPitchDeg += dy * kLightRotationSpeedDegPerPixel;
 				gLightPitchDeg = std::clamp(gLightPitchDeg, -89.0f, 89.0f);
@@ -1741,7 +2929,7 @@ void main() {
 		}
 
 		if (yoffset != 0.0) {
-			OrbitCamera& targetCamera = IsAltDown(window) ? gPlaneCamera : gObjectCamera;
+			OrbitCamera& targetCamera = gObjectCamera;
 			targetCamera.distance -= static_cast<float>(yoffset) * 0.2f;
 			targetCamera.distance = std::max(targetCamera.distance, kMinCameraDistance);
 		}
@@ -1772,10 +2960,6 @@ void main() {
 			gObjectCamera.pitchDeg = 0.0f;
 			gObjectCamera.panX = 0.0f;
 			gObjectCamera.panY = 0.0f;
-			gPlaneCamera.yawDeg = 0.0f;
-			gPlaneCamera.pitchDeg = 0.0f;
-			gPlaneCamera.panX = 0.0f;
-			gPlaneCamera.panY = 0.0f;
 			return;
 		}
 		if (key == GLFW_KEY_N) {
@@ -1784,7 +2968,7 @@ void main() {
 			return;
 		}
 		if (key == GLFW_KEY_F6) {
-			if (!ReloadShaders()) {
+			if (!ReloadShaders() || !ReloadDepthShader()) {
 				std::fprintf(stderr, "F6 shader reload failed.\n");
 			} else {
 				std::fprintf(stdout, "Shaders reloaded.\n");
@@ -1900,7 +3084,13 @@ void main() {
 		gObjectCamera.distance = extent * 2.5f;
 		gObjectCamera.panX = 0.0f;
 		gObjectCamera.panY = 0.0f;
-		gLightDistance = extent * 3.0f;
+		gPlaneHeight = (gBounds.min.y - gCenter.y) - (extent * kPlanePaddingRatio);
+		gPlaneWidth = 2.0f * extent * kPlaneSizeMultiplier;
+		gPlaneLength = 2.0f * extent * kPlaneSizeMultiplier;
+		gPlaneScale = 1.0f;
+		gObjectScale = glm::vec3(1.0f);
+		gLightMarkerScale = 1.0f;
+		gLightDistance = extent * 1.8f;
 		gNearPlane = std::max(0.1f, extent * 0.001f);
 		gFarPlane = std::max(kFarPlane, gObjectCamera.distance + extent * 3.0f);
 		gSelectedMaterialIndex = 0;
@@ -2054,20 +3244,56 @@ void main() {
 			ImGui::SetWindowPos(windowPos);
 		}
 
-		ImGui::Checkbox("Render To Plane", &gRenderToPlane);
+		ImGui::Checkbox("Enable Plane Reflection", &gRenderToPlane);
 		ImGui::ColorEdit3("Viewport Background", glm::value_ptr(gSceneBackgroundColor));
 		if (gRenderToPlane) {
 			ImGui::ColorEdit3("Offscreen Background", glm::value_ptr(gOffscreenBackgroundColor));
+		}
+		if (!gEnvironmentLoadStatus.empty()) {
+			ImGui::TextWrapped("%s", gEnvironmentLoadStatus.c_str());
 		}
 
 		ImGui::Separator();
 		ImGui::TextUnformatted("Light");
 		ImGui::ColorEdit3("Light Color", glm::value_ptr(gLightColor));
+		ImGui::ColorEdit3("Light Marker Color", glm::value_ptr(gLightMarkerColor));
 		ImGui::SliderFloat("Light Intensity", &gLightIntensity, 0.0f, 5.0f, "%.2f");
 		ImGui::SliderFloat("Light Distance", &gLightDistance, 0.1f, 200.0f, "%.2f");
+		ImGui::Checkbox("Show Light Marker", &gShowLightMarker);
+		if (gShowLightMarker) {
+			const char* markerModes[] = {"Point", "Cube", "Sphere", "Light Object"};
+			ImGui::Combo("Light Appearance", &gLightMarkerShape, markerModes, IM_ARRAYSIZE(markerModes));
+			if (gLightMarkerShape == static_cast<int>(LightMarkerShape::LightObject) && !gHasLightObjectMesh) {
+				ImGui::TextWrapped("Light object mesh unavailable; using sphere fallback.");
+			}
+		}
+		ImGui::SliderFloat("Spot Inner Angle", &gSpotInnerDeg, 5.0f, 60.0f, "%.1f deg");
+		ImGui::SliderFloat("Spot Outer Angle", &gSpotOuterDeg, 6.0f, 75.0f, "%.1f deg");
+		gSpotInnerDeg = std::clamp(gSpotInnerDeg, 1.0f, 69.0f);
+		gSpotOuterDeg = std::clamp(gSpotOuterDeg, gSpotInnerDeg + 1.0f, 89.9f);
+		ImGui::SliderFloat("Shadow Bias", &gShadowBias, 0.00001f, 0.00200f, "%.5f");
+		const glm::mat4 model = BuildObjectModelMatrix(gObjectCamera);
+		const glm::vec3 lightPos = ComputeLightPosition(model);
+		ImGui::Text("Light Position: (%.2f, %.2f, %.2f)", lightPos.x, lightPos.y, lightPos.z);
+		if (!gLightObjectStatus.empty()) {
+			ImGui::TextWrapped("%s", gLightObjectStatus.c_str());
+		}
 
 		ImGui::Separator();
-		ImGui::TextUnformatted("Material");
+		ImGui::TextUnformatted("Transforms");
+		ImGui::DragFloat3("Object Scale (XYZ)", glm::value_ptr(gObjectScale), 0.01f, 0.01f, 50.0f, "%.2f");
+		ImGui::SliderFloat("Plane Width", &gPlaneWidth, 0.1f, 400.0f, "%.2f");
+		ImGui::SliderFloat("Plane Length", &gPlaneLength, 0.1f, 400.0f, "%.2f");
+		ImGui::SliderFloat("Plane Scale", &gPlaneScale, 0.05f, 20.0f, "%.2f");
+		ImGui::SliderFloat("Light Marker Scale", &gLightMarkerScale, 0.1f, 10.0f, "%.2f");
+		gObjectScale = glm::max(gObjectScale, glm::vec3(0.01f));
+		gPlaneWidth = std::max(gPlaneWidth, 0.05f);
+		gPlaneLength = std::max(gPlaneLength, 0.05f);
+		gPlaneScale = std::max(gPlaneScale, 0.01f);
+		gLightMarkerScale = std::max(gLightMarkerScale, 0.1f);
+
+		ImGui::Separator();
+		ImGui::TextUnformatted("Object Material");
 		if (gMaterials.empty()) {
 			ImGui::TextUnformatted("No materials loaded.");
 		} else {
@@ -2097,6 +3323,25 @@ void main() {
 			ImGui::Text("Diffuse Texture: %s", mat.hasDiffuseTexture ? "Yes" : "No");
 			ImGui::Text("Specular Texture: %s", mat.hasSpecularTexture ? "Yes" : "No");
 		}
+
+		ImGui::Separator();
+		ImGui::TextUnformatted("Plane Material");
+		ImGui::ColorEdit3("Plane Ambient", glm::value_ptr(gPlaneAmbientColor));
+		ImGui::ColorEdit3("Plane Diffuse", glm::value_ptr(gPlaneDiffuseColor));
+		ImGui::ColorEdit3("Plane Specular", glm::value_ptr(gPlaneSpecularColor));
+		ImGui::SliderFloat("Plane Shininess", &gPlaneShininess, 1.0f, 256.0f, "%.1f");
+		ImGui::ColorEdit3("Plane Color Bias", glm::value_ptr(gPlaneColorBias));
+		ImGui::SliderFloat("Plane Env Reflection", &gPlaneEnvReflectionStrength, 0.0f, 2.5f, "%.2f");
+		ImGui::SliderFloat("Plane RTT Reflection", &gPlaneRttReflectionStrength, 0.0f, 2.5f, "%.2f");
+		ImGui::SliderFloat("Plane Reflection Brightness", &gPlaneRttReflectionBrightness, 0.0f, 2.5f, "%.2f");
+		gPlaneShininess = std::clamp(gPlaneShininess, 1.0f, 512.0f);
+		gPlaneAmbientColor = glm::clamp(gPlaneAmbientColor, glm::vec3(0.0f), glm::vec3(1.0f));
+		gPlaneDiffuseColor = glm::clamp(gPlaneDiffuseColor, glm::vec3(0.0f), glm::vec3(1.0f));
+		gPlaneSpecularColor = glm::clamp(gPlaneSpecularColor, glm::vec3(0.0f), glm::vec3(1.0f));
+		gPlaneColorBias = glm::clamp(gPlaneColorBias, glm::vec3(-0.25f), glm::vec3(0.25f));
+		gPlaneEnvReflectionStrength = std::clamp(gPlaneEnvReflectionStrength, 0.0f, 5.0f);
+		gPlaneRttReflectionStrength = std::clamp(gPlaneRttReflectionStrength, 0.0f, 5.0f);
+		gPlaneRttReflectionBrightness = std::clamp(gPlaneRttReflectionBrightness, 0.0f, 5.0f);
 
 		ImGui::Separator();
 		ImGui::TextUnformatted("Model");
@@ -2199,18 +3444,28 @@ namespace gpurenderer {
 		gObjectCamera.pitchDeg = 0.0f;
 		gObjectCamera.panX = 0.0f;
 		gObjectCamera.panY = 0.0f;
-		gPlaneCamera = OrbitCamera{0.0f, 0.0f, 2.8f, 0.0f, 0.0f};
-		gLightDistance = extent * 3.0f;
+		gPlaneHeight = (gBounds.min.y - gCenter.y) - (extent * kPlanePaddingRatio);
+		gPlaneWidth = 2.0f * extent * kPlaneSizeMultiplier;
+		gPlaneLength = 2.0f * extent * kPlaneSizeMultiplier;
+		gPlaneScale = 1.0f;
+		gObjectScale = glm::vec3(1.0f);
+		gLightMarkerScale = 1.0f;
+		gLightDistance = extent * 1.8f;
 		gNearPlane = std::max(0.1f, extent * 0.001f);
 		gFarPlane = std::max(kFarPlane, gObjectCamera.distance + extent * 3.0f);
 
-		if (!ReloadShaders()) {
+		if (!ReloadShaders() || !ReloadDepthShader()) {
 			return false;
 		}
 
 		CreateBuffers();
 		CreatePlaneBuffers();
+		if (!InitializeEnvironmentAssets()) {
+			std::fprintf(stderr, "%s\n", gEnvironmentLoadStatus.c_str());
+			return false;
+		}
 		CreateLightBuffers();
+
 		if (!InitializeGui(gWindow)) {
 			std::fprintf(stderr, "Failed to initialize GUI backend.\n");
 			return false;
@@ -2232,7 +3487,8 @@ namespace gpurenderer {
 		RefreshAvailableObjFiles();
 		gModelLoadStatus = "Loaded model: " + gObjPath;
 
-		std::printf("Controls: Left/right drag = object rotate/zoom, ALT+left/right drag = plane rotate/zoom, middle drag = pan selected view, CTRL+left drag = light rotate, P = toggle projection, N = normals, F6 = reload shaders.\n");
+		std::printf("%s\n", gEnvironmentLoadStatus.c_str());
+		std::printf("Controls: Left/right drag = object rotate/zoom, middle drag = pan, CTRL+left drag = light rotate, P = toggle projection, N = normals, F6 = reload shaders.\n");
 		std::printf("Loaded %d triangles (%zu vertices) from %s\n", gIndexCount / 3, gVertices.size(), gObjPath.c_str());
 		return true;
 	}
@@ -2246,6 +3502,8 @@ namespace gpurenderer {
 
 	void Shutdown() {
 		ShutdownGui();
+		DestroyBackgroundBuffers();
+		DestroyLightBuffers();
 
 		if (pglDeleteBuffers) {
 			if (gEbo != 0) {
@@ -2260,9 +3518,6 @@ namespace gpurenderer {
 			if (gPlaneVbo != 0) {
 				pglDeleteBuffers(1, &gPlaneVbo);
 			}
-			if (gLightVbo != 0) {
-				pglDeleteBuffers(1, &gLightVbo);
-			}
 		}
 		if (gUseVao && pglDeleteVertexArrays) {
 			if (gVao != 0) {
@@ -2271,12 +3526,18 @@ namespace gpurenderer {
 			if (gPlaneVao != 0) {
 				pglDeleteVertexArrays(1, &gPlaneVao);
 			}
-			if (gLightVao != 0) {
-				pglDeleteVertexArrays(1, &gLightVao);
-			}
 		}
 		if (gProgram != 0) {
 			pglDeleteProgram(gProgram);
+			gProgram = 0;
+		}
+		if (gDepthProgram != 0) {
+			pglDeleteProgram(gDepthProgram);
+			gDepthProgram = 0;
+		}
+		if (gEnvironmentCubemap != 0) {
+			glDeleteTextures(1, &gEnvironmentCubemap);
+			gEnvironmentCubemap = 0;
 		}
 		if (!gTextureCache.empty()) {
 			std::vector<GLuint> textures;
@@ -2291,6 +3552,7 @@ namespace gpurenderer {
 			}
 		}
 		DestroyRenderTexture();
+		DestroyShadowMap();
 		gTextureCache.clear();
 		gWindow = nullptr;
 	}
